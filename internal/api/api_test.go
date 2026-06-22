@@ -247,3 +247,13 @@ func TestDeleteRecord_NotFound(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 }
+
+// ── health endpoint ───────────────────────────────────────────────────────────
+
+func TestHealthz(t *testing.T) {
+	srv := newTestServer(&mockRS{}, &testutil.MockZoneStore{})
+	rr := doRequest(t, srv, http.MethodGet, "/healthz", nil)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Body.String(), `"ok"`)
+}

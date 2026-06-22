@@ -51,6 +51,9 @@ func New(cfg config.APIConfig, pg iface.RecordStore, zs iface.ZoneStore, log *za
 	// Prometheus metrics endpoint — consumed by Prometheus scraper.
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
+	// Health endpoints — used as liveness/readiness probes.
+	r.GET("/healthz", s.healthz)
+
 	return s
 }
 
@@ -74,4 +77,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // httptest.ResponseRecorder in tests without binding to a real port.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.httpSrv.Handler.ServeHTTP(w, r)
+}
+
+// healthz returns 200 {"status":"ok"} unconditionally.
+// Suitable for liveness probes; a non-200 only occurs if the process is dead.
+func (s *Server) healthz(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
