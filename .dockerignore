@@ -1,0 +1,28 @@
+# Version control
+.git/
+.gitignore
+
+# Documentation — not needed inside the build container
+docs/
+*.md
+*.html
+
+# CI / tooling
+.github/
+Makefile
+
+# Local build artifacts
+/dns-edge
+/out/
+
+# IDE / OS noise
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+
+# Test / bench output — source files are still included so `go test` inside
+# a dev container works, but cached test results can be excluded
+**/*.test
+**/*.out

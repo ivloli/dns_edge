@@ -1,0 +1,27 @@
+dns-edge {
+    listen   :5300
+    workers  0          # SO_REUSEPORT worker 数；0=禁用，-1=NumCPU，默认 0
+    tcp      true
+    edns0    true       # 启用 EDNS0，UDP 上限 4096B
+
+    api {
+        listen :8080
+    }
+
+    postgres {
+        dsn  postgres://user:pass@localhost:5432/dnsdb?sslmode=disable
+    }
+
+    nacos {
+        addr           localhost:8848
+        namespace      ""
+        group          DEFAULT_GROUP
+        data_id_prefix dns_weights:
+    }
+
+    sync {
+        interval  30s
+        prob      0.01
+        ratelimit 100
+    }
+}

@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>dns-edge 技术设计文档</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-size: 15px;
+      line-height: 1.7;
+      color: #1a1a2e;
+      background: #f4f6fb;
+    }
+
+    /* ── Layout ── */
+    .layout { display: flex; min-height: 100vh; }
+
+    nav {
+      width: 260px;
+      flex-shrink: 0;
+      background: #1a1a2e;
+      color: #c8cfe8;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+      padding: 24px 0 40px;
+    }
+
+    nav .logo {
+      padding: 0 20px 20px;
+      font-size: 17px;
+      font-weight: 700;
+      color: #fff;
+      border-bottom: 1px solid #2e2e4e;
+      margin-bottom: 12px;
+    }
+    nav .logo span { color: #4f8ef7; }
+
+    nav a {
+      display: block;
+      padding: 6px 20px;
+      color: #8a93b8;
+      text-decoration: none;
+      font-size: 13px;
+      border-left: 3px solid transparent;
+      transition: all .15s;
+    }
+    nav a:hover { color: #fff; background: #252543; }
+    nav a.active { color: #4f8ef7; border-left-color: #4f8ef7; background: #1e2240; }
+    nav .section-label {
+      padding: 14px 20px 4px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: #4a5080;
+    }
+
+    main {
+      flex: 1;
+      padding: 40px 48px;
+      max-width: 960px;
+    }
+
+    /* ── Typography ── */
+    h1 { font-size: 28px; font-weight: 700; color: #0f1028; margin-bottom: 8px; }
+    h2 {
+      font-size: 20px; font-weight: 700; color: #1a1a2e;
+      margin: 48px 0 16px;
+      padding-bottom: 8px;
+      border-bottom: 2px solid #e2e8f5;
+    }
+    h3 { font-size: 16px; font-weight: 600; color: #2d3661; margin: 28px 0 10px; }
+    h4 { font-size: 14px; font-weight: 600; color: #4a5580; margin: 20px 0 8px; }
+
+    p { margin-bottom: 12px; color: #333; }
+
+    .subtitle {
+      font-size: 14px;
+      color: #6b7280;
+      margin-bottom: 32px;
+      padding-bottom: 24px;
+      border-bottom: 1px solid #e2e8f5;
+    }
+
+    /* ── Code ── */
+    pre {
+      background: #0f1028;
+      color: #c8d3f5;
+      border-radius: 8px;
+      padding: 20px;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.6;
+      margin: 16px 0;
+      font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+    }
+    code {
+      font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+      font-size: 12.5px;
+      background: #eef2fc;
+      color: #3b5bdb;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    pre code { background: none; color: inherit; padding: 0; font-size: inherit; }
+
+    /* ── Tables ── */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0;
+      font-size: 14px;
+    }
+    th {
+      background: #1a1a2e;
+      color: #c8cfe8;
+      padding: 10px 14px;
+      text-align: left;
+      font-weight: 600;
+      font-size: 13px;
+    }
+    td { padding: 9px 14px; border-bottom: 1px solid #e2e8f5; vertical-align: top; }
+    tr:nth-child(even) td { background: #f8faff; }
+    tr:hover td { background: #eef4ff; }
+
+    /* ── Cards / Callouts ── */
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; margin: 20px 0; }
+    .card {
+      background: #fff;
+      border: 1px solid #dde3f5;
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .card .label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #8a93b8; font-weight: 600; margin-bottom: 6px; }
+    .card .value { font-size: 15px; font-weight: 700; color: #1a1a2e; }
+    .card .sub { font-size: 12px; color: #6b7280; margin-top: 4px; }
+
+    .callout {
+      border-left: 4px solid #4f8ef7;
+      background: #eef4ff;
+      padding: 14px 18px;
+      border-radius: 0 8px 8px 0;
+      margin: 16px 0;
+      font-size: 14px;
+      color: #1e3a8a;
+    }
+    .callout.warn { border-color: #f59e0b; background: #fffbeb; color: #92400e; }
+    .callout.ok   { border-color: #10b981; background: #ecfdf5; color: #065f46; }
+
+    /* ── Arch diagram ── */
+    .arch-box {
+      background: #0f1028;
+      color: #c8d3f5;
+      border-radius: 10px;
+      padding: 24px;
+      font-family: "JetBrains Mono", Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.8;
+      overflow-x: auto;
+      margin: 16px 0;
+    }
+
+    /* ── Badges ── */
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-left: 6px;
+    }
+    .badge-go   { background: #e0f2fe; color: #0369a1; }
+    .badge-pg   { background: #ede9fe; color: #6d28d9; }
+    .badge-red  { background: #fee2e2; color: #991b1b; }
+
+    /* ── Record type pills ── */
+    .rtype {
+      display: inline-block;
+      background: #1a1a2e;
+      color: #c8d3f5;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 12px;
+      margin: 2px;
+    }
+
+    /* ── Section anchor ── */
+    section { scroll-margin-top: 24px; }
+
+    ul { padding-left: 20px; margin-bottom: 12px; }
+    li { margin-bottom: 4px; color: #333; }
+
+    @media (max-width: 768px) {
+      nav { display: none; }
+      main { padding: 24px 20px; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="layout">
+
+  <!-- ── Sidebar ── -->
+  <nav id="nav">
+    <div class="logo">dns&#8209;<span>edge</span></div>
+    <div class="section-label">概览</div>
+    <a href="#background">背景与目标</a>
+    <a href="#positioning">项目定位</a>
+    <a href="#arch">整体架构</a>
+
+    <div class="section-label">核心模块</div>
+    <a href="#zonestore">ZoneStore 内存存储</a>
+    <a href="#handler">DNS QueryHandler</a>
+    <a href="#routing">流量分流</a>
+    <a href="#api">HTTP API</a>
+    <a href="#pg">PostgreSQL 数据模型</a>
+    <a href="#sync">多实例同步</a>
+    <a href="#axfr">AXFR Zone Transfer</a>
+
+    <div class="section-label">设计原则</div>
+    <a href="#principles">模块接口设计</a>
+    <a href="#corefile">Corefile 配置</a>
+    <div class="section-label">部署</div>
+    <a href="#deploy-single">单机部署</a>
+    <a href="#deploy-multi">多实例部署</a>
+    <a href="#docker">Docker</a>
+    <a href="#config">配置项</a>
+
+    <div class="section-label">参考</div>
+    <a href="#perf">性能设计</a>
+    <a href="#deps">依赖版本</a>
+    <a href="#roadmap">后续扩展</a>
+  </nav>
+
+  <!-- ── Main ── -->
+  <main>
+
+    <h1>dns-edge 技术设计文档</h1>
+    <p class="subtitle">
+      基于 Go + miekg/dns 的高性能权威 DNS 服务，支持 HTTP 热更新 API 与流量分流
+      <span class="badge badge-go">Go 1.25</span>
+      <span class="badge badge-pg">PostgreSQL</span>
+      <span class="badge badge-red">Nacos</span>
+    </p>
+
+    <!-- ── 1. 背景 ── -->
+    <section id="background">
+      <h2>1. 背景与目标</h2>
+
+      <h3>背景</h3>
+      <p>传统权威 DNS（BIND、NSD）的记录变更需要修改 Zone 文件并重新加载，操作繁琐且有短暂中断风险。在微服务、容器化场景下，后端 IP 频繁变更，需要一套能够实时、无重启地更新 DNS 记录的权威 DNS 服务。</p>
+      <p>同时，随着多 IDC、多可用区部署的普及，同一域名往往对应多个后端，需要根据后端的实时负载或健康状况动态调整流量分配比例。</p>
+
+      <h3>目标</h3>
+      <ul>
+        <li>实现符合 RFC 标准的权威 DNS 服务</li>
+        <li>提供 HTTP REST API，支持 DNS 记录实时热更新（无需重启）</li>
+        <li>支持基于权重的流量分流，权重可由外部采样系统动态写入 Nacos DataID</li>
+        <li>支持多实例水平扩展，实例间保持最终一致</li>
+        <li>单二进制部署，容器化友好（镜像 &lt; 20MB）</li>
+      </ul>
+    </section>
+
+    <!-- ── 1.3 项目定位 ── -->
+    <section id="positioning">
+      <h2>1.3 项目定位</h2>
+      <div class="callout ok">
+        <strong>dns-edge 是一个 <code>miekg/dns</code> 项目，不是 CoreDNS 项目。</strong>
+      </div>
+      <table>
+        <tr><th>项目</th><th>说明</th></tr>
+        <tr><td><code>miekg/dns</code></td><td>Go DNS 协议库，提供 RR 类型、ServeMux、PacketConn 等基础设施</td></tr>
+        <tr><td>CoreDNS</td><td>基于 miekg/dns 的插件化 DNS 框架，引入 plugin chain / coremain / Corefile 解析器</td></tr>
+        <tr><td>dns-edge</td><td><strong>直接使用 miekg/dns</strong>，不引入 CoreDNS plugin chain 和 coremain。仅可选借鉴 <code>coredns/caddy</code> 解析 Corefile 风格配置</td></tr>
+      </table>
+      <p style="margin-top:12px">dns-edge 的配置格式参考 Corefile 块级语法（可读性好），但底层直接调用 <code>miekg/dns</code> API 启动 DNS 服务，与 CoreDNS 框架无关。</p>
+    </section>
+
+    <!-- ── 2. 架构 ── -->
+    <section id="arch">
+      <h2>2. 整体架构</h2>
+
+      <h3>系统拓扑</h3>
+      <div class="arch-box"><pre>
+┌──────────────────────────────────────────────────────────────┐
+│                           客户端                               │
+│              plain DNS (:53)       DNS-over-TLS (:853)        │
+└────────────────┬──────────────────────────┬──────────────────┘
+                 │                          │
+                 ▼                          ▼
+       ┌──────────────────────────────────────────┐
+       │                  dnsdist                  │
+       │      TLS 终止 / 负载均衡 / 健康检查        │
+       └──────────────────┬───────────────────────┘
+                          │  plain DNS :5300
+              ┌───────────┼───────────┐
+              ▼           ▼           ▼
+          ┌───────┐   ┌───────┐   ┌───────┐
+          │ inst1 │   │ inst2 │   │ inst3 │   ← dns-edge 实例
+          └───┬───┘   └───┬───┘   └───┬───┘
+              │           │           │
+              └─────────────────┬─────┘
+                                │
+                   ┌────────────┴──────────┐
+                   │                       │
+                   ▼                       ▼
+             PostgreSQL                 Nacos
+          （DNS 记录持久化）       （分流权重，ListenConfig 推送）
+                   ▲
+                   │ 写入 DataID 权重
+           ┌───────┴────────┐
+           │   采样系统      │   ← 独立服务，探测后端健康/延迟
+           └────────────────┘</pre></div>
+
+      <h3>单实例内部结构</h3>
+      <div class="arch-box"><pre>
+dns-edge 进程
+├── DNS Server (UDP + TCP :5300)
+│     ├── UDP：SO_REUSEPORT × N goroutine（各持独立 socket，内核分发包）
+│     ├── TCP：goroutine-per-connection
+│     └── QueryHandler
+│           ├── 读 ZoneStore（内存，RWMutex / COW）
+│           └── 读 WeightCache（内存，Nacos ListenConfig 回调更新）
+│
+├── HTTP API Server (:8080)
+│     └── RecordHandler
+│           ├── 写 PostgreSQL（先写，失败则 abort）
+│           └── 写 ZoneStore（后写内存）
+│
+└── SyncScheduler（后台 goroutine）
+      ├── 定时任务：每 30s 从 PG 增量拉取变更
+      └── 概率任务：DNS 查询路径上 1% 概率触发同步（Token Bucket 限速）</pre></div>
+    </section>
+
+    <!-- ── 3. ZoneStore ── -->
+    <section id="zonestore">
+      <h2>3. ZoneStore（内存存储层）</h2>
+
+      <p>ZoneStore 是所有 DNS 查询的直接数据源，需保证高并发读性能。</p>
+
+      <h3>数据结构</h3>
+      <pre><code>type ZoneStore struct {
+    mu    sync.RWMutex
+    zones map[string]*Zone   // key: 域名（FQDN，带尾点）
+}
+
+type Zone struct {
+    Name    string
+    Records map[RecordKey][]*Record  // key: (name, type)
+}
+
+type Record struct {
+    Name    string
+    Type    uint16
+    TTL     uint32
+    Value   string
+    Weight  int   // 0 表示不参与分流
+}</code></pre>
+
+      <h3>并发策略</h3>
+      <table>
+        <tr><th>操作</th><th>锁策略</th><th>说明</th></tr>
+        <tr><td>DNS 查询（读）</td><td><code>RLock()</code></td><td>允许并发读，零竞争</td></tr>
+        <tr><td>热更新 API（写）</td><td><code>Lock()</code></td><td>独占写，低频操作</td></tr>
+        <tr><td>PG 同步（写）</td><td><code>Lock()</code></td><td>每 30s 一次，影响极小</td></tr>
+      </table>
+
+      <div class="callout">
+        <strong>第一阶段：RWMutex</strong>（默认）。DNS 场景读多写少，RWMutex 读锁本质是原子操作，高并发读下竞争极低，开发期足够使用。
+      </div>
+
+      <h3>可选升级：atomic.Value COW（零锁读）</h3>
+      <p>压测发现 ZoneStore 锁竞争明显时，升级为 Copy-on-Write 模式，读路径完全无锁：</p>
+      <pre><code>// 读路径：一次原子 load，零锁
+zones := s.snapshot.Load().(map[string]*Zone)
+
+// 写路径：复制旧 map → 修改 → 原子替换
+// （写操作本身加 Mutex 防并发写，写是低频操作）
+s.mu.Lock()
+defer s.mu.Unlock()
+old := s.snapshot.Load().(map[string]*Zone)
+next := make(map[string]*Zone, len(old))
+for k, v := range old { next[k] = v }
+next[zone.Name] = zone
+s.snapshot.Store(next)</code></pre>
+
+      <div class="callout warn">
+        不建议使用 <code>xsync.Map</code> 等第三方并发 Map。其价值在于高并发写不同 key 的场景（如计数器）；DNS ZoneStore 写入整个 Zone 对象且极低频，无额外收益，反而引入外部依赖。
+      </div>
+    </section>
+
+    <!-- ── 4. Handler ── -->
+    <section id="handler">
+      <h2>4. DNS QueryHandler</h2>
+
+      <p>基于 <code>miekg/dns</code> 实现 <code>dns.Handler</code> 接口：</p>
+
+      <pre><code>func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+    q := r.Question[0]
+
+    // 1. 查找记录
+    records := h.store.Lookup(q.Name, q.Qtype)
+    if records == nil {
+        // NXDOMAIN
+        m := new(dns.Msg)
+        m.SetRcode(r, dns.RcodeNameError)
+        w.WriteMsg(m)
+        return
+    }
+
+    // 2. 分流选择（如有多后端）
+    selected := h.selectByWeight(records)
+
+    // 3. 构造响应
+    m := new(dns.Msg)
+    m.SetReply(r)
+    m.Authoritative = true
+    for _, rr := range selected {
+        m.Answer = append(m.Answer, rr)
+    }
+    w.WriteMsg(m)
+
+    // 4. 概率触发 PG 同步
+    if rand.Float64() &lt; h.syncProb {
+        go h.syncer.TriggerSync()
+    }
+}</code></pre>
+
+      <h3>支持的记录类型</h3>
+      <div>
+        <span class="rtype">A</span>
+        <span class="rtype">AAAA</span>
+        <span class="rtype">CNAME</span>
+        <span class="rtype">MX</span>
+        <span class="rtype">TXT</span>
+        <span class="rtype">NS</span>
+        <span class="rtype">SOA</span>
+        <span class="rtype">PTR</span>
+        <span class="rtype">SRV</span>
+      </div>
+    </section>
+
+    <!-- ── 5. 分流 ── -->
+    <section id="routing">
+      <h2>5. 流量分流</h2>
+
+      <h3>权重来源优先级</h3>
+      <pre><code>Nacos 动态权重  &gt;  PG 静态权重  &gt;  均等分配（fallback）</code></pre>
+
+      <h3>Nacos 权重格式</h3>
+      <pre><code>DataID: dns_weights:{fqdn}:{type}         // 例：dns_weights:api.example.com.:A
+Group:  DEFAULT_GROUP（可按环境配置）
+Value:  {"1.2.3.4": 70, "5.6.7.8": 30}
+
+启动时 getConfig 全量拉取；ListenConfig 注册回调，Nacos 推送变更后毫秒级生效。
+Nacos 不可用时自动降级为 PG 静态权重，PG 也无权重则均等分配。</code></pre>
+
+      <h3>加权随机算法</h3>
+      <pre><code>func weightedRandom(records []*Record) *Record {
+    total := 0
+    for _, r := range records {
+        total += r.Weight
+    }
+    n := rand.Intn(total)
+    for _, r := range records {
+        n -= r.Weight
+        if n &lt; 0 {
+            return r
+        }
+    }
+    return records[len(records)-1]
+}</code></pre>
+
+      <div class="callout ok">
+        采样系统与 DNS 服务完全解耦。DNS 层通过 Nacos ListenConfig 回调感知权重变更，采样系统随时可以独立上线/更新算法，不影响 DNS 服务。
+      </div>
+    </section>
+
+    <!-- ── 6. HTTP API ── -->
+    <section id="api">
+      <h2>6. HTTP API</h2>
+
+      <p>基于 Gin 实现，监听 <code>:8080</code>，所有接口前缀 <code>/api/v1</code>，返回 JSON。</p>
+
+      <h3>写操作流程</h3>
+      <div class="arch-box"><pre>
+请求 → 参数校验 → 写 PostgreSQL → 更新内存 ZoneStore → 响应 200
+                       │
+                  失败时返回 500，不更新内存（以 PG 为准）</pre></div>
+
+      <h3>接口列表</h3>
+      <table>
+        <tr><th>方法</th><th>路径</th><th>说明</th></tr>
+        <tr><td><code>GET</code></td><td><code>/api/v1/domains</code></td><td>列出所有域名</td></tr>
+        <tr><td><code>POST</code></td><td><code>/api/v1/domains</code></td><td>添加域名</td></tr>
+        <tr><td><code>DELETE</code></td><td><code>/api/v1/domains/:domain</code></td><td>删除域名及所有记录</td></tr>
+        <tr><td><code>GET</code></td><td><code>/api/v1/domains/:domain/records</code></td><td>列出域名下所有记录</td></tr>
+        <tr><td><code>POST</code></td><td><code>/api/v1/domains/:domain/records</code></td><td>添加记录（立即生效）</td></tr>
+        <tr><td><code>PUT</code></td><td><code>/api/v1/domains/:domain/records/:id</code></td><td>更新记录（立即生效）</td></tr>
+        <tr><td><code>DELETE</code></td><td><code>/api/v1/domains/:domain/records/:id</code></td><td>删除记录（立即生效）</td></tr>
+      </table>
+
+      <h3>请求体示例</h3>
+      <h4>添加单条 A 记录</h4>
+      <pre><code>{
+  "name": "www.example.com.",
+  "type": "A",
+  "ttl": 300,
+  "value": "1.2.3.4"
+}</code></pre>
+
+      <h4>添加分流记录（多后端权重）</h4>
+      <pre><code>{
+  "name": "api.example.com.",
+  "type": "A",
+  "ttl": 10,
+  "backends": [
+    {"value": "1.2.3.4", "weight": 70},
+    {"value": "5.6.7.8", "weight": 30}
+  ]
+}</code></pre>
+    </section>
+
+    <!-- ── 7. PG ── -->
+    <section id="pg">
+      <h2>7. PostgreSQL 数据模型</h2>
+
+      <pre><code>-- 域名表
+CREATE TABLE domains (
+    id         BIGSERIAL PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,    -- FQDN，带尾点，如 example.com.
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ             -- 软删除
+);
+
+-- 记录表
+CREATE TABLE records (
+    id         BIGSERIAL PRIMARY KEY,
+    domain_id  BIGINT NOT NULL REFERENCES domains(id),
+    name       TEXT NOT NULL,           -- FQDN
+    type       TEXT NOT NULL,           -- A / AAAA / CNAME / MX ...
+    ttl        INTEGER NOT NULL DEFAULT 300,
+    value      TEXT NOT NULL,
+    weight     INTEGER NOT NULL DEFAULT 100,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ             -- 软删除
+);
+
+CREATE INDEX idx_records_domain_id  ON records(domain_id);
+CREATE INDEX idx_records_updated_at ON records(updated_at);</code></pre>
+
+      <div class="callout warn">
+        删除操作使用软删除（设置 <code>deleted_at</code>），不能物理删除。否则增量拉取时无法感知已删除的记录，导致其他实例内存中残留。
+      </div>
+
+      <h3>增量同步查询</h3>
+      <pre><code>SELECT r.*, d.name AS domain_name
+FROM records r
+JOIN domains d ON r.domain_id = d.id
+WHERE r.updated_at > $1
+   OR d.updated_at > $1
+ORDER BY r.updated_at ASC;</code></pre>
+    </section>
+
+    <!-- ── 8. 多实例同步 ── -->
+    <section id="sync">
+      <h2>8. 多实例同步</h2>
+
+      <h3>定时同步（30s 间隔）</h3>
+      <pre><code>goroutine 启动 → 记录 last_sync_at
+循环：
+  sleep(30s)
+  SELECT * FROM records WHERE updated_at > last_sync_at
+  批量更新内存 ZoneStore
+  更新 last_sync_at</code></pre>
+
+      <h3>概率触发同步（1% 概率）</h3>
+      <p>在 <code>ServeDNS</code> 路径末尾，以 1% 概率异步触发一次增量同步。配合 Token Bucket 速率限制，防止 QPS 高峰期打爆 PG。</p>
+
+      <h3>一致性窗口</h3>
+      <table>
+        <tr><th>场景</th><th>最大不一致窗口</th></tr>
+        <tr><td>API 写入本实例</td><td>0ms（直接更新内存）</td></tr>
+        <tr><td>其他实例定时同步</td><td>≤ 30s</td></tr>
+        <tr><td>其他实例概率触发</td><td>≤ 几秒（高 QPS 下）</td></tr>
+      </table>
+
+      <div class="callout ok">
+        最终一致性模型与 DNS TTL 机制天然兼容——下游 resolver 本身会缓存记录到 TTL 过期，30s 的同步窗口在 DNS 语义上完全可接受。
+      </div>
+    </section>
+
+    <!-- ── 9. AXFR ── -->
+    <section id="axfr">
+      <h2>9. AXFR Zone Transfer</h2>
+
+      <p>多实例或主从部署时，slave 节点可通过 AXFR 协议从 master 拉取完整 Zone 数据。<code>miekg/dns</code> 原生支持 AXFR，实现成本低。</p>
+
+      <ul>
+        <li>收到 AXFR 查询时，从 ZoneStore 序列化完整 Zone，按协议格式分包返回</li>
+        <li>SOA serial 格式：<code>YYYYMMDDnn</code>（Unix 时间戳风格），每次 API 写操作后自增</li>
+        <li>slave 节点对比 serial 决定是否触发 AXFR，减少不必要的传输</li>
+      </ul>
+    </section>
+
+    <!-- ── 8. 设计原则 ── -->
+    <section id="principles">
+      <h2>8. 设计原则</h2>
+
+      <h3>模块间只依赖接口</h3>
+      <p>所有跨模块调用通过 Go interface 而非具体类型传递。切换底层实现（如 RWMutex → COW）只需改启动时的依赖注入，调用方代码零修改。</p>
+
+      <h4>核心接口（实现时细化）</h4>
+      <pre><code>// ZoneStore — DNS 查询和热更新的核心存储
+// 第一阶段：RWMutexStore；可选升级：COWStore
+type ZoneStore interface {
+    Lookup(name string, qtype uint16) []*Record
+    Update(zone *Zone) error
+    Delete(name string) error
+    Snapshot() map[string]*Zone   // 供 AXFR 使用
+}
+
+// WeightProvider — 分流权重来源
+// NacosWeightProvider    → Nacos ListenConfig 推送，毫秒级感知变更（主）
+// StaticWeightProvider   → 从 ZoneStore 读静态权重（PG 持久化，降级用）
+// CompositeWeightProvider → Nacos 优先，Nacos 不可用时自动降级静态
+type WeightProvider interface {
+    GetWeights(fqdn string, qtype uint16) map[string]int
+}
+
+// Syncer — PG 增量同步，解耦同步策略与存储实现
+type Syncer interface {
+    TriggerSync() error
+    Start(ctx context.Context)
+}</code></pre>
+
+      <h4>依赖方向</h4>
+      <div class="arch-box"><pre>
+cmd/dns-edge (main)
+    │  注入具体实现
+    ├── dns.Handler      依赖 ZoneStore + WeightProvider
+    ├── api.Handler      依赖 ZoneStore + pg.Store
+    └── sync.Scheduler   依赖 ZoneStore + pg.Store
+
+各模块不 import 兄弟模块的包，只 import 公共 interface 包。
+切换实现 = 改 main 里的注入，业务代码零改动。</pre></div>
+
+      <div class="callout ok">
+        接口细节在写代码时细化，设计原则先定：模块间只传接口，不传具体类型。
+      </div>
+    </section>
+
+    <section id="corefile">
+      <h3>Corefile 风格配置</h3>
+      <p>参考 CoreDNS 的块级语法，每个模块只读自己的块，<code>workers</code> 字段直接控制 SO_REUSEPORT 的 goroutine 数量：</p>
+      <pre><code>dns-edge {
+    listen   :5300
+    workers  0          # SO_REUSEPORT；0=禁用，-1=NumCPU，默认 0
+    tcp      true
+    edns0    true       # 启用 EDNS0，UDP 上限 4096B
+
+    api {
+        listen :8080
+    }
+
+    postgres {
+        dsn  postgres://user:pass@host:5432/db?sslmode=require
+    }
+
+    nacos {
+        addr           nacos:8848
+        namespace      ""           # 命名空间 ID（默认 public）
+        group          DEFAULT_GROUP
+        data_id_prefix dns_weights: # DataID 格式：dns_weights:{fqdn}:{type}
+    }
+
+    sync {
+        interval  30s
+        prob      0.01
+        ratelimit 100       # 概率触发最大 QPS
+    }
+}</code></pre>
+      <div class="callout">
+        第一阶段 <code>workers 0</code>（禁用 SO_REUSEPORT），压测发现单 socket 是瓶颈后改为 <code>workers -1</code>（NumCPU），无需改代码。
+      </div>
+    </section>
+
+    <!-- ── 9. 部署 ── -->
+    <section id="deploy-single">
+      <h2>9. 部署方案</h2>
+
+      <h3>单机部署</h3>
+      <div class="arch-box"><pre>
+:853 (DoT)    :53 (plain)
+      │              │
+      └──────────────┘
+              │
+          dnsdist (:5300 → localhost)
+              │
+          dns-edge (:5300, :8080)
+              │
+      PostgreSQL + Nacos（本机或远端）</pre></div>
+    </section>
+
+    <section id="deploy-multi">
+      <h3>多实例部署（推荐）</h3>
+      <div class="arch-box"><pre>
+                    LB (dnsdist)
+                  /      │      \
+            inst1       inst2    inst3
+               \          │       /
+                \──────────┼──────/
+                           │
+                     PostgreSQL（主从或云托管）
+                           │
+                         Nacos（集群，已有基础设施）</pre></div>
+
+      <p>实例间无需互相通信，均独立读 PG / Nacos，通过定时同步保持最终一致。</p>
+    </section>
+
+    <section id="docker">
+      <h3>Docker 镜像</h3>
+      <pre><code>FROM golang:1.25-alpine AS builder
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o dns-edge ./cmd/dns-edge
+
+FROM scratch
+COPY --from=builder /build/dns-edge /dns-edge
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+ENTRYPOINT ["/dns-edge"]</code></pre>
+      <p>目标镜像大小：<strong>&lt; 20MB</strong></p>
+    </section>
+
+    <section id="config">
+      <h3>配置项</h3>
+      <pre><code># config.yaml
+dns:
+  listen: ":5300"
+  tcp: true
+
+api:
+  listen: ":8080"
+
+pg:
+  dsn: "postgres://user:pass@host:5432/dnsdb?sslmode=require"
+
+nacos:
+  addr: "nacos:8848"
+  namespace: ""                    # 命名空间 ID，默认 public
+  group: "DEFAULT_GROUP"
+  data_id_prefix: "dns_weights:"   # DataID = prefix + fqdn + ":" + type
+
+sync:
+  interval: "30s"
+  prob: 0.01
+  rate_limit: 100           # 概率触发最大 QPS</code></pre>
+    </section>
+
+    <!-- ── 11. 性能 ── -->
+    <section id="perf">
+      <h2>12. 性能设计</h2>
+
+      <h3>性能预估</h3>
+      <div class="cards">
+        <div class="card">
+          <div class="label">DNS QPS / 实例</div>
+          <div class="value">50,000+</div>
+          <div class="sub">纯内存查询，无 I/O</div>
+        </div>
+        <div class="card">
+          <div class="label">热更新延迟</div>
+          <div class="value">&lt; 5ms</div>
+          <div class="sub">PG 写入 + 内存更新</div>
+        </div>
+        <div class="card">
+          <div class="label">同实例一致延迟</div>
+          <div class="value">0ms</div>
+          <div class="sub">直接更新内存</div>
+        </div>
+        <div class="card">
+          <div class="label">跨实例一致延迟</div>
+          <div class="value">≤ 30s</div>
+          <div class="sub">定时同步</div>
+        </div>
+        <div class="card">
+          <div class="label">镜像大小</div>
+          <div class="value">&lt; 20MB</div>
+          <div class="sub">FROM scratch</div>
+        </div>
+        <div class="card">
+          <div class="label">内存占用</div>
+          <div class="value">~50MB</div>
+          <div class="sub">百万条记录估算</div>
+        </div>
+      </div>
+
+      <h3>性能优化策略</h3>
+      <p>按优先级排列，按需逐步启用，不过早优化。</p>
+
+      <h4>① ZoneStore 读路径零锁（atomic.Value COW）</h4>
+      <p><strong>问题</strong>：RWMutex 在写操作时会短暂阻塞所有读者。<strong>方案</strong>：atomic.Value 保存 Zone Map 快照，读时 load 指针无锁，写时复制 Map 后 atomic store 替换。适用时机：压测发现 ZoneStore 锁竞争明显时升级。</p>
+
+      <h4>② DNS 消息 Buffer 复用（sync.Pool）</h4>
+      <p><strong>问题</strong>：高 QPS 下每次查询分配 <code>dns.Msg</code> 和字节缓冲区，GC 压力大。<strong>方案</strong>：用 <code>sync.Pool</code> 复用 <code>[]byte</code> 缓冲区，减少堆分配和 GC 停顿，降低 P99 延迟抖动。</p>
+      <pre><code>var bufPool = sync.Pool{
+    New: func() any {
+        buf := make([]byte, dns.DefaultMsgSize)
+        return &amp;buf
+    },
+}
+buf := bufPool.Get().(*[]byte)
+defer bufPool.Put(buf)</code></pre>
+
+      <h4>③ EDNS0 支持（减少 TCP Fallback）</h4>
+      <p><strong>问题</strong>：标准 DNS UDP 响应限 512 字节，大记录（MX/TXT）触发客户端 TCP 重试，增加延迟和连接数。<strong>方案</strong>：响应中声明 EDNS0（RFC 6891），UDP 上限扩展至 4096 字节，大幅减少 TCP fallback。</p>
+      <pre><code>opt := &amp;dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
+opt.SetUDPSize(4096)
+m.Extra = append(m.Extra, opt)</code></pre>
+
+      <h4>④ UDP 多 Socket 并发读（SO_REUSEPORT）</h4>
+      <p><strong>问题</strong>：默认单 socket 由单 goroutine 串行读包，是多核瓶颈。<strong>方案</strong>：<code>SO_REUSEPORT</code> 让多个 socket 同时绑定同一端口，内核将 UDP 包哈希分发到各 socket，多 goroutine 并发读，消除读取串行瓶颈。</p>
+      <div class="arch-box"><pre>
+对外只有一个 :5300 端口，内核将包分散到多个 socket：
+
+  外部 :5300 UDP
+      │
+      ├── socket1 → goroutine1 → handler
+      ├── socket2 → goroutine2 → handler   ← 内核哈希分发
+      └── socket3 → goroutine3 → handler
+
+Worker 数量通过配置项控制，默认 runtime.NumCPU()</pre></div>
+      <pre><code>lc := net.ListenConfig{
+    Control: func(network, address string, c syscall.RawConn) error {
+        return c.Control(func(fd uintptr) {
+            syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET,
+                syscall.SO_REUSEPORT, 1)
+        })
+    },
+}
+// 启动 dns.workers 个 goroutine，各自 ListenPacket(":5300")</code></pre>
+      <p>适用时机：单机 QPS 超过 10 万后考虑启用，前期用默认单 socket 即可。</p>
+
+      <h3>优化启用路径</h3>
+      <div class="arch-box"><pre>
+第一阶段（开发期）：RWMutex + 默认单 socket
+    ↓  压测 QPS 瓶颈
+第二阶段：启用 SO_REUSEPORT + sync.Pool + EDNS0
+    ↓  发现 GC / 锁竞争
+第三阶段：升级 atomic.Value COW</pre></div>
+    </section>
+
+    <!-- ── 12. 依赖 ── -->
+    <section id="deps">
+      <h2>12. 依赖版本</h2>
+      <table>
+        <tr><th>库</th><th>版本</th><th>用途</th></tr>
+        <tr><td><code>github.com/miekg/dns</code></td><td>v1.1.x</td><td>DNS 协议实现</td></tr>
+        <tr><td><code>github.com/gin-gonic/gin</code></td><td>v1.10.x</td><td>HTTP API</td></tr>
+        <tr><td><code>github.com/jackc/pgx/v5</code></td><td>v5.x</td><td>PostgreSQL 驱动</td></tr>
+        <tr><td><code>github.com/nacos-group/nacos-sdk-go/v2</code></td><td>v2.x</td><td>Nacos 配置中心客户端</td></tr>
+        <tr><td><code>go.uber.org/zap</code></td><td>v1.x</td><td>结构化日志</td></tr>
+      </table>
+    </section>
+
+    <!-- ── 13. Roadmap ── -->
+    <section id="roadmap">
+      <h2>13. 后续扩展方向</h2>
+      <ul>
+        <li><strong>采样系统集成</strong>：独立服务探测后端延迟/成功率，按公式计算权重写入 Nacos DataID（<code>dns_weights:{fqdn}:{type}</code>）</li>
+        <li><strong>DNSSEC</strong>：由 dnsdist 层处理，权威 DNS 不实现签名</li>
+        <li><strong>Prometheus 指标</strong>：查询 QPS、延迟分布、同步延迟、权重快照</li>
+        <li><strong>Web 控制台</strong>：可视化管理 DNS 记录和分流权重</li>
+        <li><strong>gRPC API</strong>：作为 HTTP API 补充，供内部服务调用</li>
+      </ul>
+    </section>
+
+  </main>
+</div>
+
+<script>
+  // 高亮当前章节的导航项
+  const sections = document.querySelectorAll('section[id]');
+  const navLinks = document.querySelectorAll('nav a');
+
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        navLinks.forEach(a => a.classList.remove('active'));
+        const active = document.querySelector(`nav a[href="#${e.target.id}"]`);
+        if (active) active.classList.add('active');
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+
+  sections.forEach(s => observer.observe(s));
+</script>
+
+</body>
+</html>
