@@ -64,9 +64,25 @@ func (h *Handler) ServeDNS(w mdns.ResponseWriter, r *mdns.Msg) {
 	m.RecursionAvailable = false
 
 	// EDNS0: reflect client's OPT back; advertise 4096-byte UDP buffer (RFC 6891).
-	// The OPT RR is included in all responses, including errors, per the RFC.
-	if r.IsEdns0() != nil {
+	// If the query carries an ECS option (RFC 7871), extract clientIP and echo
+	// it back with scope=0 (answer is not yet geo-specific; future geo-routing
+	// will set SourceScope to the actual matched prefix length).
+	var clientIP net.IP
+	if opt := r.IsEdns0(); opt != nil {
 		m.SetEdns0(4096, false)
+		for _, o := range opt.Option {
+			if ecs, ok := o.(*mdns.EDNS0_SUBNET); ok {
+				clientIP = ecs.Address
+				m.IsEdns0().Option = append(m.IsEdns0().Option, &mdns.EDNS0_SUBNET{
+					Code:          mdns.EDNS0SUBNET,
+					Family:        ecs.Family,
+					SourceNetmask: ecs.SourceNetmask,
+					SourceScope:   0, // scope=0: response not geo-specific yet
+					Address:       ecs.Address,
+				})
+				break
+			}
+		}
 	}
 
 	h.log.Debug("query",
@@ -74,7 +90,7 @@ func (h *Handler) ServeDNS(w mdns.ResponseWriter, r *mdns.Msg) {
 		zap.String("type", mdns.TypeToString[q.Qtype]),
 	)
 
-	h.handleQuery(m, r, q)
+	h.handleQuery(m, r, q, clientIP)
 
 	// Instrument after handleQuery so we capture the final rcode.
 	qtypeStr := mdns.TypeToString[q.Qtype]
@@ -86,7 +102,8 @@ func (h *Handler) ServeDNS(w mdns.ResponseWriter, r *mdns.Msg) {
 
 // handleQuery populates m based on q. It never calls w.WriteMsg — that is
 // the responsibility of the caller (ServeDNS).
-func (h *Handler) handleQuery(m *mdns.Msg, r *mdns.Msg, q mdns.Question) {
+// clientIP is the ECS client address (nil when no ECS option was present).
+func (h *Handler) handleQuery(m *mdns.Msg, r *mdns.Msg, q mdns.Question, clientIP net.IP) {
 	// RFC 8482: answer TYPE=ANY with a minimal HINFO
 	if q.Qtype == mdns.TypeANY {
 		m.Answer = append(m.Answer, &mdns.HINFO{
@@ -103,7 +120,7 @@ func (h *Handler) handleQuery(m *mdns.Msg, r *mdns.Msg, q mdns.Question) {
 	// Direct rrset lookup
 	records := h.store.Lookup(q.Name, q.Qtype)
 	if len(records) > 0 {
-		h.addAnswers(m, records, q.Name, q.Qtype)
+		h.addAnswers(m, records, q.Name, q.Qtype, clientIP)
 		return
 	}
 
@@ -122,7 +139,7 @@ func (h *Handler) handleQuery(m *mdns.Msg, r *mdns.Msg, q mdns.Question) {
 			if target != "" {
 				targeted := h.store.Lookup(target, q.Qtype)
 				if len(targeted) > 0 {
-					h.addAnswers(m, targeted, target, q.Qtype)
+					h.addAnswers(m, targeted, target, q.Qtype, clientIP)
 				}
 			}
 			return
@@ -152,10 +169,10 @@ func (h *Handler) handleQuery(m *mdns.Msg, r *mdns.Msg, q mdns.Question) {
 // addAnswers appends the rrset to the answer section.
 // A and AAAA records are reduced to a single weighted-random pick;
 // all other types are returned in full.
-func (h *Handler) addAnswers(m *mdns.Msg, records []*iface.Record, fqdn string, qtype uint16) {
+func (h *Handler) addAnswers(m *mdns.Msg, records []*iface.Record, fqdn string, qtype uint16, clientIP net.IP) {
 	switch qtype {
 	case mdns.TypeA, mdns.TypeAAAA:
-		rec := h.pick(records, fqdn, qtype)
+		rec := h.pick(records, fqdn, qtype, clientIP)
 		if rec != nil && rec.RR != nil {
 			m.Answer = append(m.Answer, rec.RR)
 		}
@@ -272,12 +289,15 @@ func (h *Handler) serveAXFR(w mdns.ResponseWriter, r *mdns.Msg, name string) {
 //
 // Weight priority: WeightProvider (dynamic, e.g. Nacos) > Record.Weight (static)
 // > equal distribution (weight treated as 1 when zero).
-func (h *Handler) pick(records []*iface.Record, fqdn string, qtype uint16) *iface.Record {
+//
+// clientIP is the ECS client address passed through from the query. Current
+// WeightProvider implementations ignore it; future geo-routing will use it.
+func (h *Handler) pick(records []*iface.Record, fqdn string, qtype uint16, clientIP net.IP) *iface.Record {
 	if len(records) == 1 {
 		return records[0]
 	}
 
-	dynWeights := h.weights.GetWeights(fqdn, qtype)
+	dynWeights := h.weights.GetWeights(fqdn, qtype, clientIP)
 
 	total := 0
 	ws := make([]int, len(records))

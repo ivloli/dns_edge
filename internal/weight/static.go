@@ -1,6 +1,10 @@
 package weight
 
-import "dns-edge/internal/iface"
+import (
+	"net"
+
+	"dns-edge/internal/iface"
+)
 
 // StaticWeightProvider reads per-record weights directly from ZoneStore
 // (Record.Weight). Used as the fallback when NacosWeightProvider is
@@ -16,8 +20,9 @@ func NewStatic(store iface.ZoneStore) *StaticWeightProvider {
 }
 
 // GetWeights returns the static weights for (fqdn, qtype) from ZoneStore.
+// clientIP is reserved for future geo-routing; currently ignored.
 // Returns nil when all records have Weight == 0 (equal distribution).
-func (p *StaticWeightProvider) GetWeights(fqdn string, qtype uint16) map[string]int {
+func (p *StaticWeightProvider) GetWeights(fqdn string, qtype uint16, _ net.IP) map[string]int {
 	records := p.store.Lookup(fqdn, qtype)
 	ws := make(map[string]int, len(records))
 	for _, r := range records {

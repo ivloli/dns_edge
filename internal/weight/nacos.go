@@ -3,6 +3,7 @@ package weight
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,9 +54,10 @@ func NewNacosWeightProvider(cfg config.NacosConfig, log *zap.Logger) (*NacosWeig
 }
 
 // GetWeights returns the cached weight map for (fqdn, qtype).
+// clientIP is reserved for future geo-routing; currently ignored.
 // Registers a Nacos listener lazily on first call for an unknown key.
 // Returns nil when no dynamic weights are configured.
-func (p *NacosWeightProvider) GetWeights(fqdn string, qtype uint16) map[string]int {
+func (p *NacosWeightProvider) GetWeights(fqdn string, qtype uint16, _ net.IP) map[string]int {
 	key := cacheKey(fqdn, qtype)
 
 	// lazy-register: only one goroutine wins the LoadOrStore race per key

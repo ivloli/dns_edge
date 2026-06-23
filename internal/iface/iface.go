@@ -2,6 +2,7 @@ package iface
 
 import (
 	"context"
+	"net"
 	"strings"
 	"time"
 
@@ -106,14 +107,19 @@ type RecordStore interface {
 // Returns nil when no dynamic weights are available; the caller falls back
 // to Record.Weight (static) and then to equal distribution.
 //
+// clientIP is the client address extracted from the EDNS0 Client Subnet option
+// (RFC 7871). It is nil when the query carries no ECS option. Current
+// implementations ignore clientIP; it is reserved for future geo-routing.
+//
 // Phase 5 implementations:
 //   - NacosWeightProvider  — primary; Nacos ListenConfig push, millisecond latency
 //   - StaticWeightProvider — fallback; reads Record.Weight from ZoneStore
 //   - CompositeWeightProvider — tries Nacos first, degrades to Static
 type WeightProvider interface {
 	// GetWeights returns a map of rdata-value → weight for (fqdn, qtype).
+	// clientIP is the ECS client subnet address (nil if absent).
 	// Returns nil if no dynamic weights are configured for this name.
-	GetWeights(fqdn string, qtype uint16) map[string]int
+	GetWeights(fqdn string, qtype uint16, clientIP net.IP) map[string]int
 }
 
 // Syncer drives incremental pull from PostgreSQL into ZoneStore.

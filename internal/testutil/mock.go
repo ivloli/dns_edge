@@ -82,14 +82,14 @@ func (m *MockZoneStore) FindZone(name string) *iface.Zone {
 
 // MockWeightProvider is a function-field mock of iface.WeightProvider.
 type MockWeightProvider struct {
-	GetWeightsFn func(fqdn string, qtype uint16) map[string]int
+	GetWeightsFn func(fqdn string, qtype uint16, clientIP net.IP) map[string]int
 }
 
 var _ iface.WeightProvider = (*MockWeightProvider)(nil)
 
-func (m *MockWeightProvider) GetWeights(fqdn string, qtype uint16) map[string]int {
+func (m *MockWeightProvider) GetWeights(fqdn string, qtype uint16, clientIP net.IP) map[string]int {
 	if m.GetWeightsFn != nil {
-		return m.GetWeightsFn(fqdn, qtype)
+		return m.GetWeightsFn(fqdn, qtype, clientIP)
 	}
 	return nil
 }

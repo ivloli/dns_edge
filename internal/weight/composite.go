@@ -1,6 +1,10 @@
 package weight
 
-import "dns-edge/internal/iface"
+import (
+	"net"
+
+	"dns-edge/internal/iface"
+)
 
 // CompositeWeightProvider delegates to primary, falling back to secondary
 // when primary returns nil.
@@ -17,9 +21,9 @@ func NewComposite(primary, secondary iface.WeightProvider) *CompositeWeightProvi
 	return &CompositeWeightProvider{primary: primary, secondary: secondary}
 }
 
-func (p *CompositeWeightProvider) GetWeights(fqdn string, qtype uint16) map[string]int {
-	if ws := p.primary.GetWeights(fqdn, qtype); ws != nil {
+func (p *CompositeWeightProvider) GetWeights(fqdn string, qtype uint16, clientIP net.IP) map[string]int {
+	if ws := p.primary.GetWeights(fqdn, qtype, clientIP); ws != nil {
 		return ws
 	}
-	return p.secondary.GetWeights(fqdn, qtype)
+	return p.secondary.GetWeights(fqdn, qtype, clientIP)
 }

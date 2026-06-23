@@ -1,6 +1,10 @@
 package weight
 
-import "dns-edge/internal/iface"
+import (
+	"net"
+
+	"dns-edge/internal/iface"
+)
 
 // Null is the Phase-1 WeightProvider.
 // It always returns nil, causing the DNS handler to fall back to
@@ -12,4 +16,4 @@ type Null struct{}
 // Compile-time interface check.
 var _ iface.WeightProvider = Null{}
 
-func (Null) GetWeights(_ string, _ uint16) map[string]int { return nil }
+func (Null) GetWeights(_ string, _ uint16, _ net.IP) map[string]int { return nil }
