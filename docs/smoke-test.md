@@ -239,3 +239,5 @@ curl -s http://localhost:8080/metrics | grep -E '^dns_'
 | 增量同步 | 等 30s 后查 metrics | `dns_sync_total{result="success"} ≥ 1` | ✅ |
 | Prometheus | `curl /metrics` | dns_* 指标均有数据 | ✅ |
 | 多类型 metrics | dig ANY/MX 后查 metrics | qtype 标签涵盖多种类型 | ✅ |
+| ECS 回显（带子网）| `dig +subnet=1.2.3.0/24` | OPT 含 `CLIENT-SUBNET: 1.2.3.0/24/0` | ✅ |
+| ECS 回显（无子网）| `dig +edns=0 +nosubnet` | OPT 无 `CLIENT-SUBNET` 行 | ✅ |

@@ -50,6 +50,8 @@ ok  dns-edge/internal/syncer     0.017s
 | `internal/syncer` | `syncer_test.go` | 8 | tokenBucket 限流/时间前进/容量上限、TriggerSync 非阻塞、doSync 调用链 |
 | `internal/api` | `api_test.go` | 15 | 域名/记录 CRUD 全路径、Conflict/NotFound 错误码、`/healthz` |
 
+> **MockWeightProvider** 签名已更新为 `GetWeights(fqdn, qtype, clientIP net.IP)`，现有测试无需修改（零值 mock 返回 nil，clientIP 参数忽略）。
+
 ---
 
 ## 3. 基准测试
@@ -247,7 +249,29 @@ dig @127.0.0.1 -p 5300 www.example.com. A +noedns
 
 **预期**：响应无 OPT 记录（`ADDITIONAL SECTION` 为空）
 
-### 4.12 AXFR Zone Transfer
+### 4.12 ECS（EDNS Client Subnet，RFC 7871）回显
+
+dns-edge 当前实现：读取查询中的 ECS option，原样 echo-back，scope 固定为 0（表示答案不按子网分区缓存）。
+
+```bash
+# 带 ECS 子网，验证回显
+dig @127.0.0.1 -p 5300 www.example.com. A +subnet=1.2.3.0/24
+```
+
+**预期**：
+- `status: NOERROR`，A 记录正常返回
+- OPT PSEUDOSECTION 含 `CLIENT-SUBNET: 1.2.3.0/24/0`（source=24，scope=0）
+
+```bash
+# 不带 ECS，响应 OPT 中不含 CLIENT-SUBNET
+dig @127.0.0.1 -p 5300 www.example.com. A +edns=0 +nosubnet
+```
+
+**预期**：OPT 中只有 `udp: 4096`，无 `CLIENT-SUBNET` 行
+
+> **scope=0 的含义**：resolver 收到 scope=0 时，该响应不会按子网分区缓存（相当于全局共享缓存）。未来实现地理路由后，scope 会设置为实际匹配 prefix 长度，resolver 才会按子网缓存不同答案。
+
+### 4.13 AXFR Zone Transfer
 
 ```bash
 # AXFR 需要 TCP
@@ -266,7 +290,7 @@ dig @127.0.0.1 -p 5300 example.com. AXFR
 
 **预期**：`status: REFUSED`
 
-### 4.13 TCP 查询
+### 4.14 TCP 查询
 
 ```bash
 dig @127.0.0.1 -p 5300 www.example.com. A +tcp
