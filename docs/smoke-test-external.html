@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dns-edge 外部冒烟测试文档</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    line-height: 1.7;
+    color: #172b4d;
+    background: #fff;
+    padding: 32px 40px;
+    max-width: 960px;
+  }
+
+  h1 { font-size: 24px; font-weight: 700; margin-bottom: 8px; color: #0052cc; }
+  h2 { font-size: 18px; font-weight: 600; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 2px solid #dfe1e6; color: #172b4d; }
+  h3 { font-size: 14px; font-weight: 600; margin: 20px 0 8px; color: #344563; }
+
+  .meta { color: #6b778c; font-size: 13px; margin-bottom: 24px; }
+
+  p { margin: 8px 0; }
+
+  /* 环境变量卡片 */
+  .env-card {
+    background: #f4f5f7;
+    border: 1px solid #dfe1e6;
+    border-left: 4px solid #0052cc;
+    border-radius: 4px;
+    padding: 16px 20px;
+    margin: 12px 0 20px;
+  }
+  .env-card .env-row { display: flex; align-items: center; margin: 6px 0; gap: 12px; }
+  .env-card .env-key { font-family: monospace; font-weight: 700; color: #0052cc; min-width: 110px; }
+  .env-card .env-val { font-family: monospace; background: #fff; border: 1px solid #dfe1e6; border-radius: 3px; padding: 2px 8px; color: #172b4d; }
+  .env-card .env-desc { color: #6b778c; font-size: 12px; }
+
+  /* 代码块 */
+  pre {
+    background: #1e2a3a;
+    color: #cdd9e5;
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin: 8px 0 12px;
+    overflow-x: auto;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  pre .comment { color: #768ea2; }
+  pre .cmd { color: #79c0ff; }
+  pre .flag { color: #ffa657; }
+  pre .str { color: #a5d6ff; }
+
+  code {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    background: #f0f1f3;
+    border: 1px solid #dfe1e6;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 12.5px;
+    color: #c0392b;
+  }
+
+  /* 期望结果 */
+  .expected {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    background: #e3fcef;
+    border: 1px solid #abf5d1;
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin: 4px 0 12px;
+    font-size: 13px;
+    color: #006644;
+  }
+  .expected::before { content: "✓"; font-weight: 700; color: #00875a; flex-shrink: 0; }
+
+  /* 表格 */
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th {
+    background: #f4f5f7;
+    color: #344563;
+    font-weight: 600;
+    text-align: left;
+    padding: 9px 12px;
+    border: 1px solid #dfe1e6;
+  }
+  td { padding: 8px 12px; border: 1px solid #dfe1e6; vertical-align: top; }
+  tr:nth-child(even) td { background: #fafbfc; }
+
+  /* 检查单状态列 */
+  .status-col { text-align: center; width: 60px; }
+  td.status-col { font-size: 16px; }
+
+  /* 提示块 */
+  .note {
+    background: #fffae6;
+    border: 1px solid #ffe380;
+    border-left: 4px solid #ffab00;
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin: 12px 0;
+    font-size: 13px;
+    color: #172b4d;
+  }
+  .note strong { color: #ff8b00; }
+
+  .step-num {
+    display: inline-block;
+    background: #0052cc;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    border-radius: 50%;
+    width: 22px;
+    height: 22px;
+    line-height: 22px;
+    text-align: center;
+    margin-right: 6px;
+    flex-shrink: 0;
+  }
+  .step-title {
+    display: flex;
+    align-items: center;
+    margin: 20px 0 8px;
+  }
+  .step-title h3 { margin: 0; }
+
+  hr { border: none; border-top: 1px solid #dfe1e6; margin: 28px 0; }
+</style>
+</head>
+<body>
+
+<h1>dns-edge 外部冒烟测试</h1>
+<p class="meta">通过 Nginx 专线代理访问测试环境 · 可在任意外部机器执行 · 更新日期：2026-06-24</p>
+
+<div class="note">
+  <strong>前置条件：</strong>执行所有测试前，先完成第 0 节的环境变量配置。所有命令使用 <code>$DNS</code> / <code>$API</code> 变量，无需手动替换 IP 和端口。
+</div>
+
+<!-- ───────── 0. 环境变量 ───────── -->
+<h2>0. 环境变量配置</h2>
+<p>在终端中执行以下命令（每次新开终端都需要重新设置）：</p>
+<pre>
+<span class="comment"># Nginx 代理机 IP（专线入口）</span>
+export NGINX_IP=120.25.74.229
+
+<span class="comment"># 对外暴露的端口（Nginx 侧）</span>
+export DNS_PORT=15300      <span class="comment"># DNS 查询端口（UDP + TCP）</span>
+export API_PORT=28082      <span class="comment"># HTTP API / Prometheus 端口</span>
+
+<span class="comment"># 快捷变量</span>
+export DNS="@${NGINX_IP} -p ${DNS_PORT}"
+export API="http://${NGINX_IP}:${API_PORT}"</pre>
+
+<p>变量含义说明：</p>
+<div class="env-card">
+  <div class="env-row">
+    <span class="env-key">NGINX_IP</span>
+    <span class="env-val">120.25.74.229</span>
+    <span class="env-desc">Nginx 专线代理机，外部流量入口</span>
+  </div>
+  <div class="env-row">
+    <span class="env-key">DNS_PORT</span>
+    <span class="env-val">15300</span>
+    <span class="env-desc">Nginx 对外暴露的 DNS 端口（代理到目标机 :5300）</span>
+  </div>
+  <div class="env-row">
+    <span class="env-key">API_PORT</span>
+    <span class="env-val">28082</span>
+    <span class="env-desc">Nginx 对外暴露的 HTTP API 端口（代理到目标机 :8080）</span>
+  </div>
+  <div class="env-row">
+    <span class="env-key">$DNS</span>
+    <span class="env-val">@120.25.74.229 -p 15300</span>
+    <span class="env-desc">dig 命令的 server 参数，直接追加在 dig 后</span>
+  </div>
+  <div class="env-row">
+    <span class="env-key">$API</span>
+    <span class="env-val">http://120.25.74.229:28082</span>
+    <span class="env-desc">curl 请求的 base URL</span>
+  </div>
+</div>
+
+<!-- ───────── 1. 启动检查 ───────── -->
+<h2>1. 启动检查</h2>
+<pre>curl -s ${API}/healthz</pre>
+<div class="expected"><code>{"status":"ok"}</code>，HTTP 200</div>
+
+<!-- ───────── 2. 创建测试数据 ───────── -->
+<h2>2. 创建测试数据</h2>
+<p>通过 API 写入基础测试记录，后续 DNS 验证依赖这些数据。</p>
+
+<div class="step-title"><span class="step-num">1</span><h3>创建测试域名</h3></div>
+<pre>
+curl -sX POST ${API}/api/v1/domains \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"example.com."}' | jq .</pre>
+<div class="expected"><code>{"id":1,"name":"example.com."}</code></div>
+
+<div class="step-title"><span class="step-num">2</span><h3>添加 A 记录（单条）</h3></div>
+<pre>
+curl -sX POST ${API}/api/v1/domains/example.com./records \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"www.example.com.","type":"A","ttl":300,"value":"1.2.3.4"}' | jq .</pre>
+
+<div class="step-title"><span class="step-num">3</span><h3>添加 A 记录（两条，带权重，用于分流验证）</h3></div>
+<pre>
+curl -sX POST ${API}/api/v1/domains/example.com./records \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"api.example.com.","type":"A","ttl":10,"value":"10.0.0.1","weight":70}' | jq .
+
+curl -sX POST ${API}/api/v1/domains/example.com./records \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"api.example.com.","type":"A","ttl":10,"value":"10.0.0.2","weight":30}' | jq .</pre>
+
+<!-- ───────── 3. DNS 功能验证 ───────── -->
+<h2>3. DNS 功能验证</h2>
+
+<h3>3.1 A 记录查询</h3>
+<pre>dig ${DNS} www.example.com. A +short</pre>
+<div class="expected"><code>1.2.3.4</code></div>
+
+<h3>3.2 加权分流（StaticWeightProvider）</h3>
+<pre>for i in $(seq 1 20); do dig ${DNS} api.example.com. A +short; done | sort | uniq -c</pre>
+<div class="expected"><code>10.0.0.1</code> 约 14 次，<code>10.0.0.2</code> 约 6 次（70/30 权重，有统计波动）</div>
+
+<h3>3.3 NXDOMAIN（名称不存在）</h3>
+<pre>dig ${DNS} notexist.example.com. A +noall +comments | grep status</pre>
+<div class="expected"><code>status: NXDOMAIN</code></div>
+
+<h3>3.4 NODATA（名称存在但类型不匹配）</h3>
+<pre>dig ${DNS} www.example.com. MX +noall +comments | grep status</pre>
+<div class="expected"><code>status: NOERROR</code>，ANSWER 为空，AUTHORITY 含 SOA</div>
+
+<h3>3.5 REFUSED（不在授权范围）</h3>
+<pre>dig ${DNS} google.com. A +noall +comments | grep status</pre>
+<div class="expected"><code>status: REFUSED</code></div>
+
+<h3>3.6 RFC 8482 TypeANY</h3>
+<pre>dig ${DNS} www.example.com. ANY +short</pre>
+<div class="expected"><code>"RFC8482" ""</code></div>
+
+<h3>3.7 EDNS0 协商</h3>
+<pre>dig ${DNS} www.example.com. A +edns=0 | grep "udp:"</pre>
+<div class="expected"><code>udp: 4096</code></div>
+
+<h3>3.8 ECS 回显（带子网）</h3>
+<pre>dig ${DNS} www.example.com. A +subnet=1.2.3.0/24</pre>
+<div class="expected">OPT PSEUDOSECTION 含 <code>CLIENT-SUBNET: 1.2.3.0/24/0</code>（source=24，scope=0）</div>
+
+<h3>3.9 ECS 回显（不带子网）</h3>
+<pre>dig ${DNS} www.example.com. A +edns=0 +nosubnet | grep -A5 "OPT PSEUDOSECTION"</pre>
+<div class="expected">OPT 只有 <code>udp: 4096</code>，无 <code>CLIENT-SUBNET</code> 行</div>
+
+<h3>3.10 AXFR Zone Transfer（TCP）</h3>
+<pre>dig ${DNS} example.com. AXFR +tcp | grep -v "^;"</pre>
+<div class="expected">SOA → 各 A 记录 → SOA，包含区域内所有记录</div>
+
+<h3>3.11 TCP 查询</h3>
+<pre>dig ${DNS} www.example.com. A +tcp +short</pre>
+<div class="expected"><code>1.2.3.4</code>（与 UDP 结果一致）</div>
+
+<!-- ───────── 4. 热更新 ───────── -->
+<h2>4. 热更新验证</h2>
+<p>验证 API 写入后 DNS 查询立即生效（不需要等 TTL 过期）。</p>
+<pre>
+<span class="comment"># 添加记录，保存 ID</span>
+ID=$(curl -sX POST ${API}/api/v1/domains/example.com./records \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"hottest.example.com.","type":"A","ttl":5,"value":"10.0.1.1"}' | jq -r .id)
+
+<span class="comment"># 查初始值</span>
+dig ${DNS} hottest.example.com. A +short
+<span class="comment"># 预期: 10.0.1.1</span>
+
+<span class="comment"># 热更新</span>
+curl -sX PUT ${API}/api/v1/domains/example.com./records/${ID} \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"hottest.example.com.","type":"A","ttl":5,"value":"10.0.1.99"}' | jq .
+
+<span class="comment"># 立即查询（无需等 TTL 过期）</span>
+dig ${DNS} hottest.example.com. A +short
+<span class="comment"># 预期: 10.0.1.99</span></pre>
+<div class="expected">第二次 dig 立即返回 <code>10.0.1.99</code>，热更新实时生效</div>
+
+<!-- ───────── 5. Prometheus ───────── -->
+<h2>5. Prometheus 指标</h2>
+<pre>curl -s ${API}/metrics | grep -E '^dns_'</pre>
+
+<p>预期关键指标：</p>
+<table>
+  <thead>
+    <tr><th>指标名</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>dns_queries_total{qtype="A",rcode="NOERROR"}</code></td><td>A 查询成功计数</td></tr>
+    <tr><td><code>dns_queries_total{qtype="A",rcode="NXDOMAIN"}</code></td><td>NXDOMAIN 计数</td></tr>
+    <tr><td><code>dns_queries_total{qtype="A",rcode="REFUSED"}</code></td><td>REFUSED 计数</td></tr>
+    <tr><td><code>dns_query_duration_seconds_bucket</code></td><td>查询延迟分布直方图</td></tr>
+    <tr><td><code>dns_sync_total{result="success"}</code></td><td>PG 增量同步成功次数</td></tr>
+    <tr><td><code>dns_sync_last_success_timestamp_seconds</code></td><td>最近一次同步时间戳</td></tr>
+  </tbody>
+</table>
+
+<!-- ───────── 6. 检查单 ───────── -->
+<h2>6. 冒烟测试检查单</h2>
+<table>
+  <thead>
+    <tr>
+      <th>项目</th>
+      <th>命令</th>
+      <th>预期结果</th>
+      <th class="status-col">实测</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>进程存活</td>
+      <td><code>curl ${API}/healthz</code></td>
+      <td><code>{"status":"ok"}</code></td>
+      <td class="status-col">☐</td>
+    </tr>
+    <tr>
+      <td>A 记录</td>
+      <td><code>dig ${DNS} www.example.com. A +short</code></td>
+      <td><code>1.2.3.4</code></td>
+      <td class="status-col">☐</td>
+    </tr>
+    <tr>
+      <td>加权分流</td>
+      <td>20 次 dig api.example.com.</td>
+      <td>~14/6（70/30）</td>
+      <td class="status-col">☐</td>
+    </tr>
+    <tr>
+      <td>NXDOMAIN</td>
+      <td><code>dig ${DNS} notexist.example.com. A</code></td>
+      <td><code>status: NXDOMAIN</code></td>
+      <td class="status-col">☐</td>
+    </tr>
+    <tr>
+      <td>NODATA</td>
+      <td><code>dig ${DNS} www.example.com. MX</code></td>
+      <td><code>status: NOERROR</code>，ANSWER 空</td>
+      <td class="status-col">☐</td>
+    </tr>
+    <tr>
+      <td>REFUSED</td>
+      <td><code>dig ${DNS} google.com.</code></td>
+      <td><code>status: REFUSED</code></td>
+      <td class="status-col">☐</td>
+    </tr>
+    <tr>
+      <td>RFC 8482 ANY</td>
+      <td><code>dig ${DNS} www.example.com. ANY</code></td>
+      <td><code>"RFC8482" ""</code></td>
+      <td class="status-col">☐</td>
+    </tr>
+    <tr>
+      <td>EDNS0</td>
+      <td><code>dig ${DNS} www.example.com. A +edns=0</code></td>
+      <td>OPT <code>udp: 4096</code></td>
+      <td class="status-col">☐</td>
+    </tr>
+    <tr>
+      <td>ECS 回显（带子网）</td>
+      <td><code>dig ${DNS} www.example.com. A +subnet=1.2.3.0/24</code></td>
+      <td>OPT 含 <code>CLIENT-SUBNET: 1.2.3.0/24/0</code></td>
+      <td class="status-col">☐</td>
+    </tr>
+    <tr>
+      <td>ECS 回显（无子网）</td>
+      <td><code>dig ${DNS} www.example.com. A +edns=0 +nosubnet</code></td>
+      <td>OPT 无 <code>CLIENT-SUBNET</code> 行</td>
+      <td class="status-col">☐</td>
+    </tr>
+    <tr>
+      <td>AXFR TCP</td>
+      <td><code>dig ${DNS} example.com. AXFR +tcp</code></td>
+      <td>SOA → 记录 → SOA</td>
+      <td class="status-col">☐</td>
+    </tr>
+    <tr>
+      <td>热更新</td>
+      <td>PUT 记录后立即 dig</td>
+      <td>新值立即生效</td>
+      <td class="status-col">☐</td>
+    </tr>
+    <tr>
+      <td>Prometheus</td>
+      <td><code>curl ${API}/metrics | grep dns_</code></td>
+      <td>dns_* 指标均有数据</td>
+      <td class="status-col">☐</td>
+    </tr>
+  </tbody>
+</table>
+
+</body>
+</html>
