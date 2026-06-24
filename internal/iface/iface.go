@@ -90,13 +90,13 @@ type ZoneStore interface {
 // as a second step in the dual-write path.
 type RecordStore interface {
 	// Zone operations
-	CreateZone(ctx context.Context, name string) (ZoneMeta, error)
+	CreateZone(ctx context.Context, name string) (ZoneMeta, bool, error)
 	GetZone(ctx context.Context, apex string) (ZoneMeta, error)
 	SoftDeleteZone(ctx context.Context, apex string) error
 	ListZones(ctx context.Context) ([]ZoneMeta, error)
 
 	// Record operations (zoneID is the PG primary-key from GetZone)
-	CreateRecord(ctx context.Context, zoneID int64, rec *Record) (*Record, error)
+	CreateRecord(ctx context.Context, zoneID int64, rec *Record) (*Record, bool, error)
 	UpdateRecord(ctx context.Context, zoneID, id int64, rec *Record) (*Record, error)
 	SoftDeleteRecord(ctx context.Context, zoneID, id int64) error
 	ListRecords(ctx context.Context, apex string) ([]*Record, error)

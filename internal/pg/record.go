@@ -17,7 +17,12 @@ var _ iface.RecordStore = (*Store)(nil)
 const queryCreateRecord = `
 INSERT INTO records(zone_id, name, type, ttl, value, weight)
 VALUES($1, $2, $3, $4, $5, $6)
+ON CONFLICT ON CONSTRAINT records_unique_active_rrset DO NOTHING
 RETURNING id, name, type, ttl, value, weight`
+
+const queryGetExistingRecord = `
+SELECT id, name, type, ttl, value, weight FROM records
+WHERE zone_id=$1 AND name=$2 AND type=$3 AND value=$4 AND deleted_at IS NULL`
 
 const queryUpdateRecord = `
 UPDATE records
@@ -36,10 +41,11 @@ JOIN zones z ON r.zone_id = z.id
 WHERE z.name=$1 AND z.deleted_at IS NULL AND r.deleted_at IS NULL
 ORDER BY r.name, r.type`
 
-// CreateRecord inserts a new record under the given zone.
-// Returns ErrConflict when (zone_id, name, type, value) already exists.
-// The returned Record has its RR field populated.
-func (s *Store) CreateRecord(ctx context.Context, zoneID int64, rec *iface.Record) (*iface.Record, error) {
+// CreateRecord inserts a new record under the given zone. If an active record
+// with the same (zone_id, name, type, value) already exists, it is returned as-is.
+// The second return value is true when a new row was inserted, false when the
+// existing record was returned. The returned Record has its RR field populated.
+func (s *Store) CreateRecord(ctx context.Context, zoneID int64, rec *iface.Record) (*iface.Record, bool, error) {
 	typStr := mdns.TypeToString[rec.Type]
 	if typStr == "" {
 		typStr = fmt.Sprintf("TYPE%d", rec.Type)
@@ -50,20 +56,33 @@ func (s *Store) CreateRecord(ctx context.Context, zoneID int64, rec *iface.Recor
 	err := s.pool.QueryRow(ctx, queryCreateRecord,
 		zoneID, rec.Name, typStr, rec.TTL, rec.Value, rec.Weight).
 		Scan(&out.ID, &out.Name, &typName, &out.TTL, &out.Value, &out.Weight)
-	if err != nil {
-		if isConflict(err) {
-			return nil, ErrConflict
+	if err == nil {
+		// New row inserted.
+		out.Type = mdns.StringToType[typName]
+		rr, err := parseRR(out.Name, out.TTL, typName, out.Value)
+		if err != nil {
+			return nil, false, fmt.Errorf("pg: create record: parse rr: %w", err)
 		}
-		return nil, fmt.Errorf("pg: create record: %w", err)
+		out.RR = rr
+		return &out, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, fmt.Errorf("pg: create record: %w", err)
+	}
+	// ON CONFLICT DO NOTHING fired — fetch the existing active record.
+	err = s.pool.QueryRow(ctx, queryGetExistingRecord,
+		zoneID, rec.Name, typStr, rec.Value).
+		Scan(&out.ID, &out.Name, &typName, &out.TTL, &out.Value, &out.Weight)
+	if err != nil {
+		return nil, false, fmt.Errorf("pg: create record: fetch existing: %w", err)
 	}
 	out.Type = mdns.StringToType[typName]
-
 	rr, err := parseRR(out.Name, out.TTL, typName, out.Value)
 	if err != nil {
-		return nil, fmt.Errorf("pg: create record: parse rr: %w", err)
+		return nil, false, fmt.Errorf("pg: create record: parse rr: %w", err)
 	}
 	out.RR = rr
-	return &out, nil
+	return &out, false, nil
 }
 
 // UpdateRecord replaces fields of an existing record. The record must belong

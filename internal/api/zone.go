@@ -42,12 +42,8 @@ func (s *Server) createDomain(c *gin.Context) {
 	}
 
 	apex := iface.FQDN(req.Name)
-	meta, err := s.pg.CreateZone(c.Request.Context(), apex)
+	meta, created, err := s.pg.CreateZone(c.Request.Context(), apex)
 	if err != nil {
-		if errors.Is(err, pg.ErrConflict) {
-			s.jsonError(c, http.StatusConflict, err)
-			return
-		}
 		s.jsonError(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -58,7 +54,11 @@ func (s *Server) createDomain(c *gin.Context) {
 		Records: make(map[iface.RecordKey][]*iface.Record),
 	})
 
-	c.JSON(http.StatusCreated, domainResp{ID: meta.ID, Name: meta.Name})
+	status := http.StatusCreated
+	if !created {
+		status = http.StatusOK
+	}
+	c.JSON(status, domainResp{ID: meta.ID, Name: meta.Name})
 }
 
 // DELETE /api/v1/domains/:domain

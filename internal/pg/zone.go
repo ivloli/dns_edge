@@ -10,19 +10,30 @@ import (
 	"dns-edge/internal/iface"
 )
 
-// CreateZone inserts a new active zone. Returns ErrConflict when a zone
-// with the same name already exists (even if soft-deleted).
-func (s *Store) CreateZone(ctx context.Context, name string) (iface.ZoneMeta, error) {
+// CreateZone inserts a new active zone, or returns the existing one if a zone
+// with the same name already exists. The second return value is true when the
+// zone was newly created, false when it already existed.
+func (s *Store) CreateZone(ctx context.Context, name string) (iface.ZoneMeta, bool, error) {
 	var id int64
-	err := s.pool.QueryRow(ctx,
-		`INSERT INTO zones(name) VALUES($1) RETURNING id`, name).Scan(&id)
-	if err != nil {
-		if isConflict(err) {
-			return iface.ZoneMeta{}, ErrConflict
-		}
-		return iface.ZoneMeta{}, fmt.Errorf("pg: create zone %q: %w", name, err)
+	var created bool
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO zones(name) VALUES($1)
+		ON CONFLICT (name) DO NOTHING
+		RETURNING id`, name).Scan(&id)
+	if err == nil {
+		return iface.ZoneMeta{ID: id, Name: name}, true, nil
 	}
-	return iface.ZoneMeta{ID: id, Name: name}, nil
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return iface.ZoneMeta{}, false, fmt.Errorf("pg: create zone %q: %w", name, err)
+	}
+	// Already exists — fetch the existing row.
+	err = s.pool.QueryRow(ctx,
+		`SELECT id FROM zones WHERE name=$1 AND deleted_at IS NULL`, name).Scan(&id)
+	if err != nil {
+		return iface.ZoneMeta{}, false, fmt.Errorf("pg: create zone %q: fetch existing: %w", name, err)
+	}
+	_ = created
+	return iface.ZoneMeta{ID: id, Name: name}, false, nil
 }
 
 // GetZone returns metadata for an active zone. Returns ErrNotFound when the

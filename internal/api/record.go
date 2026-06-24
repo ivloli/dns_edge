@@ -94,12 +94,8 @@ func (s *Server) createRecord(c *gin.Context) {
 	}
 
 	rec := &iface.Record{Name: name, Type: qtype, TTL: req.TTL, Value: req.Value, Weight: req.Weight, RR: rr}
-	created, err := s.pg.CreateRecord(ctx, zone.ID, rec)
+	created, isNew, err := s.pg.CreateRecord(ctx, zone.ID, rec)
 	if err != nil {
-		if errors.Is(err, pg.ErrConflict) {
-			s.jsonError(c, http.StatusConflict, err)
-			return
-		}
 		s.jsonError(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -108,7 +104,11 @@ func (s *Server) createRecord(c *gin.Context) {
 		s.log.Sugar().Warnf("zonestore PutRecord failed (PG write succeeded): %v", err)
 	}
 
-	c.JSON(http.StatusCreated, toResp(created))
+	status := http.StatusCreated
+	if !isNew {
+		status = http.StatusOK
+	}
+	c.JSON(status, toResp(created))
 }
 
 // PUT /api/v1/domains/:domain/records/:id
