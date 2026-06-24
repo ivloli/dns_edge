@@ -1,34 +1,38 @@
 # dns-edge 测试环境配置
 
-# DNS 监听端口
-listen :5300
+dns-edge {
+    # DNS 监听端口
+    listen :5300
 
-# 工作进程数（SO_REUSEPORT，0 表示单 socket）
-workers 0
+    # 工作进程数（SO_REUSEPORT，0 表示单 socket）
+    workers 0
 
-# TCP 支持
-tcp true
+    # TCP 支持
+    tcp true
 
-# API 端口
-api :8080
+    # API 端口
+    api {
+        listen :8080
+    }
 
-# PostgreSQL 连接
-postgres {
-    dsn postgres://postgres:3fcde0039bda0216c9f2fc18acb075aa@10.0.25.221:5432/postgres?sslmode=disable
-}
+    # PostgreSQL 连接
+    postgres {
+        dsn postgres://postgres:3fcde0039bda0216c9f2fc18acb075aa@10.0.25.221:5432/postgres?sslmode=disable
+    }
 
-# Nacos 配置中心（动态权重）
-nacos {
-    addr 120.25.74.229:18848
-    namespace scloud-prod
-    group dns_edge
-    username scloud-admin
-    password <your-nacos-password>
-}
+    # Nacos 配置中心（动态权重）
+    nacos {
+        addr 120.25.74.229:18848
+        namespace scloud-prod
+        group dns_edge
+        username scloud-admin
+        password <your-nacos-password>
+    }
 
-# 增量同步配置
-sync {
-    interval 30s
-    rate_limit 100
-    prob 0.01
+    # 增量同步配置
+    sync {
+        interval 30s
+        prob 0.01
+        ratelimit 100
+    }
 }
