@@ -82,12 +82,14 @@ CREATE TABLE IF NOT EXISTS records (
     weight     INTEGER      NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    deleted_at TIMESTAMPTZ,
-    CONSTRAINT records_unique_rrset UNIQUE (zone_id, name, type, value)
+    deleted_at TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_records_updated_at  ON records (updated_at);
 CREATE INDEX IF NOT EXISTS idx_records_zone_lookup ON records (zone_id, name, type)
+    WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS records_unique_active_rrset
+    ON records (zone_id, name, type, value)
     WHERE deleted_at IS NULL;
 
 CREATE OR REPLACE FUNCTION set_updated_at()

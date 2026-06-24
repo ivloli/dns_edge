@@ -2,7 +2,7 @@
 
 dns-edge {
     # DNS 监听端口
-    listen :5300
+    listen :15300
 
     # 工作进程数（SO_REUSEPORT，0 表示单 socket）
     workers 0
@@ -12,7 +12,7 @@ dns-edge {
 
     # API 端口
     api {
-        listen :8080
+        listen :28082
     }
 
     # PostgreSQL 连接

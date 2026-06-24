@@ -19,7 +19,9 @@ CREATE INDEX IF NOT EXISTS idx_zones_updated_at ON zones (updated_at);
 -- ── records ────────────────────────────────────────────────────────────────
 -- 每行代表一条 DNS 资源记录。
 -- weight = 0 代表不参与加权；均等分配由 DNS Handler 保证。
--- UNIQUE (zone_id, name, type, value) 允许同名同类型多条（加权分流），禁止完全重复。
+-- 同名同类型多条允许（加权分流），但活跃记录（deleted_at IS NULL）中不允许完全重复。
+-- 唯一约束通过下方的 partial index 实现，而非表级 CONSTRAINT，
+-- 原因：表级 UNIQUE 对软删除行也生效，导致删除后无法用相同值重建记录。
 CREATE TABLE IF NOT EXISTS records (
     id         BIGSERIAL    PRIMARY KEY,
     zone_id    BIGINT       NOT NULL REFERENCES zones(id) ON DELETE CASCADE,
@@ -30,14 +32,17 @@ CREATE TABLE IF NOT EXISTS records (
     weight     INTEGER      NOT NULL DEFAULT 0,   -- 静态权重（0 = 均等）
     created_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    deleted_at TIMESTAMPTZ,
-    CONSTRAINT records_unique_rrset UNIQUE (zone_id, name, type, value)
+    deleted_at TIMESTAMPTZ
 );
 
 -- 增量同步：按 updated_at 拉取最近变更
 CREATE INDEX IF NOT EXISTS idx_records_updated_at  ON records (updated_at);
 -- 查询热路径：按 (zone_id, name, type) 快速过滤活跃记录
 CREATE INDEX IF NOT EXISTS idx_records_zone_lookup ON records (zone_id, name, type)
+    WHERE deleted_at IS NULL;
+-- 唯一约束：仅对活跃记录（deleted_at IS NULL）生效，允许软删除后用相同值重建
+CREATE UNIQUE INDEX IF NOT EXISTS records_unique_active_rrset
+    ON records (zone_id, name, type, value)
     WHERE deleted_at IS NULL;
 
 -- ── 触发器：记录更新时自动刷新 updated_at ───────────────────────────────────
