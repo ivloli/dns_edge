@@ -6,6 +6,7 @@ package dns
 import (
 	"math/rand"
 	"net"
+	"strings"
 	"time"
 
 	mdns "github.com/miekg/dns"
@@ -341,8 +342,15 @@ func (h *Handler) pick(records []*iface.Record, fqdn string, qtype uint16, clien
 	return candidates[len(candidates)-1]
 }
 
-// filterByGeo narrows records to those matching the client's geo.
-// Falls back to default-route records, then to all records if needed.
+// filterByGeo narrows records to those best matching the client's geo.
+//
+// Fallback chain (first non-empty tier wins):
+//  1. Records whose RouteTags contain both the client's province and ISP
+//  2. Records whose RouteTags contain the client's province only
+//  3. Records whose RouteTags contain the client's ISP only
+//  4. Records whose RouteTags contain the client's country only
+//  5. Records with empty RouteTags (default route)
+//  6. All records (last resort)
 func (h *Handler) filterByGeo(records []*iface.Record, clientIP net.IP) []*iface.Record {
 	if h.geo == nil || clientIP == nil {
 		return records
@@ -350,24 +358,47 @@ func (h *Handler) filterByGeo(records []*iface.Record, clientIP net.IP) []*iface
 
 	info := h.geo.Lookup(clientIP)
 
-	// specific-route candidates: non-empty RouteTags that match
-	var specific []*iface.Record
-	// default-route candidates: empty RouteTags
-	var defaults []*iface.Record
+	var provinceISP, province, isp, country, defaults []*iface.Record
 
 	for _, r := range records {
-		if r.RouteTags == "" {
+		tags := r.RouteTags
+		if tags == "" {
 			defaults = append(defaults, r)
-		} else if info.Match(r.RouteTags) {
-			specific = append(specific, r)
+			continue
+		}
+		hasProvince := info.Province != "" && containsTag(tags, "province", info.Province)
+		hasISP := info.ISP != "" && containsTag(tags, "isp", info.ISP)
+		hasCountry := info.Country != "" && containsTag(tags, "country", info.Country)
+
+		switch {
+		case hasProvince && hasISP:
+			provinceISP = append(provinceISP, r)
+		case hasProvince:
+			province = append(province, r)
+		case hasISP:
+			isp = append(isp, r)
+		case hasCountry:
+			country = append(country, r)
 		}
 	}
 
-	if len(specific) > 0 {
-		return specific
-	}
-	if len(defaults) > 0 {
-		return defaults
+	for _, tier := range [][]*iface.Record{provinceISP, province, isp, country, defaults} {
+		if len(tier) > 0 {
+			return tier
+		}
 	}
 	return records
+}
+
+// containsTag reports whether routeTags contains key=val as one of its
+// semicolon-separated pairs. The check is a targeted single-dimension lookup,
+// not a full Match — callers check each dimension independently.
+func containsTag(routeTags, key, val string) bool {
+	target := key + "=" + val
+	for _, kv := range strings.Split(routeTags, ";") {
+		if strings.TrimSpace(kv) == target {
+			return true
+		}
+	}
+	return false
 }

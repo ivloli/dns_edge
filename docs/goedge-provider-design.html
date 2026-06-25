@@ -21,6 +21,7 @@
   .meta { color: #586069; font-size: 14px; margin-bottom: 32px; }
   .phase-header { background: #0366d6; color: white; padding: 6px 12px; border-radius: 4px; display: inline-block; margin-bottom: 12px; font-size: 14px; font-weight: 600; }
   .phase-todo { background: #6a737d; }
+  .phase-done { background: #28a745; }
 </style>
 </head>
 <body>
@@ -51,8 +52,8 @@ EdgeDNS（边缘 DNS 节点，和 EdgeNode 地位相同）</code></pre>
 <h3>1.3 目标</h3>
 <ol>
   <li><span class="badge-done">已完成</span> 实现 GoEdge customHTTP Provider 接口（<code>POST /goedge/dns</code>）</li>
-  <li><span class="badge-todo">待实现</span> 实现 GoEdge edgeDNSAPI 兼容接口（<code>POST /NS*Service/*</code>），支持智能 DNS 地理分流配置</li>
-  <li><span class="badge-todo">待实现</span> 在公司 edgeapi repo 里实现 NS 商业版服务端，让 GoEdge 管理后台具备 EdgeDNS 集群管理能力</li>
+  <li><span class="badge-done">✅ 已完成</span> 实现 GoEdge edgeDNSAPI 兼容接口（<code>POST /NS*Service/*</code>），支持智能 DNS 地理分流配置</li>
+  <li><span class="badge-done">✅ 已完成</span> 在公司 edgeapi repo 里实现 NS 商业版服务端，让 GoEdge 管理后台具备 EdgeDNS 集群管理能力</li>
 </ol>
 
 <h2>2. 架构说明</h2>
@@ -86,7 +87,7 @@ GoEdge EdgeAPI（edgeapi，MySQL）
   ├─ customHTTP Provider（已完成）
   │    POST /goedge/dns  action=AddRecord/UpdateRecord/…
   │
-  └─ edgeDNSAPI Provider（待实现）
+  └─ edgeDNSAPI Provider（✅ 已完成）
        POST /APIAccessTokenService/getAPIAccessToken
        POST /NSDomainService/…
        POST /NSRecordService/…
@@ -106,7 +107,7 @@ GoEdge EdgeAPI（edgeapi，MySQL）
 
 <h2>3. 接口方案对比</h2>
 <table>
-  <tr><th></th><th>customHTTP（已完成）</th><th>edgeDNSAPI（待实现）</th></tr>
+  <tr><th></th><th>customHTTP（已完成）</th><th>edgeDNSAPI（✅ 已完成）</th></tr>
   <tr><td>HTTP 接口数量</td><td><strong>1 个</strong>端点，<code>action</code> 字段区分</td><td><strong>14 个</strong>独立路径</td></tr>
   <tr><td>鉴权方式</td><td><code>SHA1(secret@timestamp)</code> 签名</td><td>AccessKey 换 Bearer Token</td></tr>
   <tr><td>地理路由线路</td><td><code>GetRoutes</code> 只返回 <code>default</code></td><td><code>NSRouteService</code> 返回省份/ISP/国家完整列表</td></tr>
@@ -151,8 +152,8 @@ Token: &lt;sha1(secret + "@" + timestamp)&gt;</code></pre>
   <tr><td>与 GoEdge 联调</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
 </table>
 
-<h2>5. 待实现：edgeDNSAPI 服务端（Phase 14）</h2>
-<div class="phase-header phase-todo">Phase 14 — 待实现</div>
+<h2>5. 已完成：edgeDNSAPI 服务端（Phase 14）</h2>
+<div class="phase-header phase-done">Phase 14 — ✅ 已完成</div>
 
 <h3>5.1 概述</h3>
 <p>dns-edge 实现这套接口后，GoEdge 可以把 dns-edge 当作原生 EdgeDNS 节点来管理，并通过 <code>NSRouteService</code> 配置地理路由线路，实现智能 DNS 分流。</p>
@@ -222,17 +223,17 @@ Token: &lt;sha1(secret + "@" + timestamp)&gt;</code></pre>
 <h3>5.9 实现状态</h3>
 <table>
   <tr><th>模块</th><th>状态</th></tr>
-  <tr><td><code>edgedns_provider.go</code> NS*Service 端点</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
-  <tr><td><code>edgedns_auth.go</code> AccessKey/Token 鉴权</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
-  <tr><td>NSRouteService 地理路由线路</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
-  <tr><td>nsRouteCodes ↔ route_tags 双向转换</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
-  <tr><td>配置层 <code>edgedns_access_key_*</code></td><td><span class="badge-todo">⬜ 待做</span></td></tr>
-  <tr><td>单元测试</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
+  <tr><td><code>edgedns_provider.go</code> NS*Service 端点</td><td><span class="badge-done">✅ 已完成</span></td></tr>
+  <tr><td><code>edgedns_auth.go</code> AccessKey/Token 鉴权</td><td><span class="badge-done">✅ 已完成</span></td></tr>
+  <tr><td>NSRouteService 地理路由线路</td><td><span class="badge-done">✅ 已完成</span></td></tr>
+  <tr><td>nsRouteCodes ↔ route_tags 双向转换</td><td><span class="badge-done">✅ 已完成</span></td></tr>
+  <tr><td>配置层 <code>edgedns_access_key_*</code></td><td><span class="badge-done">✅ 已完成</span></td></tr>
+  <tr><td>单元测试（22 个用例）</td><td><span class="badge-done">✅ 已完成</span></td></tr>
   <tr><td>与 GoEdge 联调</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
 </table>
 
-<h2>6. 待实现：edgeapi NS 商业版服务端（Phase 15）</h2>
-<div class="phase-header phase-todo">Phase 15 — 待实现</div>
+<h2>6. 已完成：edgeapi NS 商业版服务端（Phase 15）</h2>
+<div class="phase-header phase-done">Phase 15 — ✅ 已完成</div>
 
 <h3>6.1 概述</h3>
 <p>公司 edgeapi repo 是 GoEdge 开源版 fork，NS 相关服务均被 <code>//go:build !plus</code> 门控，为空 stub。本阶段在 edgeapi 里补全服务端实现，让 GoEdge EdgeAdmin 具备 EdgeDNS 集群管理能力。</p>
@@ -265,12 +266,13 @@ dns-edge（Phase 14 补全 edgeDNSAPI 服务端）
 <h3>6.4 实现状态</h3>
 <table>
   <tr><th>模块</th><th>状态</th></tr>
-  <tr><td><code>api_node_services_hook.go</code> 去除 <code>!plus</code> 门控</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
-  <tr><td><code>ns_record_dao.go</code> 补全 CRUD</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
-  <tr><td><code>ns_route_dao.go</code> 补全路由查询</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
-  <tr><td><code>ns_domain_dao.go</code> 补全域名查询</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
-  <tr><td><code>service_ns_record/route/domain.go</code></td><td><span class="badge-todo">⬜ 待做</span></td></tr>
-  <tr><td>REST handler 注册</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
+  <tr><td><code>api_node_services_hook.go</code> 去除 <code>!plus</code> 门控</td><td><span class="badge-done">✅ 已完成</span></td></tr>
+  <tr><td><code>ns_record_dao.go</code> 补全 CRUD</td><td><span class="badge-done">✅ 已完成</span></td></tr>
+  <tr><td><code>ns_route_dao.go</code> 补全路由查询</td><td><span class="badge-done">✅ 已完成</span></td></tr>
+  <tr><td><code>ns_domain_dao.go</code> 补全域名查询</td><td><span class="badge-done">✅ 已完成</span></td></tr>
+  <tr><td><code>service_ns_record/route/domain.go</code></td><td><span class="badge-done">✅ 已完成</span></td></tr>
+  <tr><td>REST handler 注册</td><td><span class="badge-done">✅ 已完成</span></td></tr>
+  <tr><td>EdgeCommon import 路径修复（243 文件）</td><td><span class="badge-done">✅ 已完成</span></td></tr>
   <tr><td>单元测试</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
   <tr><td>EdgeAdmin 前端</td><td><span class="badge-todo">⬜ 待评估</span></td></tr>
 </table>
@@ -283,8 +285,8 @@ dns-edge（Phase 14 补全 edgeDNSAPI 服务端）
   <tr><td>P3</td><td>Corefile <code>goedge_secret</code> 配置</td><td><span class="badge-done">✅ 已完成</span></td></tr>
   <tr><td>P4</td><td>customHTTP 单元测试（20 用例）</td><td><span class="badge-done">✅ 已完成</span></td></tr>
   <tr><td>P5</td><td>customHTTP 与 GoEdge 联调</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
-  <tr><td>P14</td><td>dns-edge edgeDNSAPI 服务端 + 地理路由线路</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
-  <tr><td>P15</td><td>edgeapi NS 商业版服务端（NSRecord/Route/Domain Service）</td><td><span class="badge-todo">⬜ 待做</span></td></tr>
+  <tr><td>P14</td><td>dns-edge edgeDNSAPI 服务端 + 地理路由线路</td><td><span class="badge-done">✅ 已完成</span></td></tr>
+  <tr><td>P15</td><td>edgeapi NS 商业版服务端（NSRecord/Route/Domain Service）</td><td><span class="badge-done">✅ 已完成</span></td></tr>
   <tr><td>P16</td><td>EdgeAdmin 前端 NS 集群管理界面</td><td><span class="badge-todo">⬜ 待评估</span></td></tr>
 </table>
 

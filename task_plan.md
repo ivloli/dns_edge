@@ -154,13 +154,47 @@
 | 2026-06-25 | PG + Nacos 保留不动 | GoEdge 只是写方，dns-edge 作为外部 DNS Provider 被调用，全球同步机制不变 |
 
 ### 阶段 11：GoEdge Provider 改造（feature/goedge-provider 分支）✅ 完成
-- [x] 技术文档：docs/goedge-provider-design.md v2.0（customHTTP 方案，架构已更正）
+- [x] 技术文档：docs/goedge-provider-design.md v3.0（customHTTP + edgeDNSAPI 双模式，架构已更正）
 - [x] `config.APIConfig` 新增 `GoEdgeSecret` 字段
 - [x] `config/parser.go` 支持 `api { goedge_secret <val> }` 配置
 - [x] `internal/api/goedge_provider.go`（`POST /goedge/dns`，9 个 action）
 - [x] `internal/api/server.go` 注册路由 + 存 secret
-- [ ] GoEdge Provider 接口单元测试（mock GoEdge 请求，覆盖各 action + 鉴权）
-- [ ] 与 GoEdge 联调测试
+- [x] GoEdge customHTTP Provider 单元测试（20 个用例，覆盖各 action + 鉴权）
+- [ ] 与 GoEdge customHTTP 联调测试（P5，待做）
+
+### 阶段 14：edgeDNSAPI 服务端（dns-edge，✅ 已完成）
+> dns-edge 作为原生 EdgeDNS 节点被 GoEdge 管理
+- [x] `internal/api/edgedns_auth.go`：AccessKey → Bearer Token（24h TTL，crypto/rand 32 字节 hex）
+- [x] `internal/api/edgedns_provider.go`：14 个 NS*Service 端点
+  - NSDomainService：ListNSDomains / FindNSDomainWithName
+  - NSRecordService：List/FindOne/FindMany/Create/Update/Delete（6 个）
+  - NSRouteService：WorldRegion / ChinaProvince / ISP / Agent / Custom（5 个）
+  - 静态路由表：11 个世界区域 + 31 个中国省份 + 4 个 ISP
+- [x] `config.APIConfig` 新增 `EdgeDNSKeyID / EdgeDNSKeySecret`
+- [x] `config/parser.go` 支持 `api { edgedns_access_key_id / edgedns_access_key_secret }` 配置
+- [x] `internal/api/edgedns_test.go`：22 个单元测试，全部通过
+- [ ] 与 GoEdge edgeDNSAPI Provider 联调测试（待做）
+
+### 阶段 15：edgeapi NS 商业版服务端（feature/ivloli 分支，✅ 已完成）
+> edgeapi repo，让 GoEdge EdgeAdmin 具备 EdgeDNS 集群管理能力
+- [x] `ns_domain_dao.go`：补全 CreateNSDomain / FindNSDomainWithName / ListNSDomains / FindEnabledNSDomain
+- [x] `ns_record_dao.go`：去掉 `!plus` build tag；补全 Create/Update/Delete/List/FindOne/FindMany
+- [x] `ns_route_dao.go`：去掉 `!plus` build tag；补全 FindAllDefaultWorldRegionRoutes / ChinaProvince / ISP / FindAllNSRoutes
+- [x] `service_ns_domain.go`（新建）：NSDomainService REST handler
+- [x] `service_ns_record.go`（新建）：NSRecordService REST handler（含 RouteIds JSON → nsRouteRef 解析）
+- [x] `service_ns_route.go`（新建）：NSRouteService REST handler
+- [x] `api_node_services_hook.go`：去掉 `!plus` build tag
+- [x] `rest_server.go`：注册 NSDomainService / NSRecordService / NSRouteService
+- [x] 修复全仓库 EdgeCommon import 路径（243 文件，内部 gitlab 路径 → 开源 github 路径，删除 replace 指令）
+- [x] `go build ./...` 全部通过
+- [ ] 单元测试（待做）
+- [ ] 与 GoEdge EdgeAdmin 联调测试（待做）
+
+### 阶段 16：EdgeAdmin 前端 NS 集群管理界面（待评估）
+> edgeadmin repo，前端 NS 集群管理 UI
+- [ ] 评估工作量（添加 NS 集群、节点、查看记录的 UI 页面）
+- [ ] 确认是复用 GoEdge 商业版现有前端还是新开发
+- [ ] 实现（待排期）
 
 ### 阶段 12：dns-control 中心控制服务（待开始）
 > 方案文档：docs/dns-control-design.md

@@ -452,3 +452,121 @@ func TestGeoRouting_NilClientIP_AllCandidates(t *testing.T) {
 	}
 	assert.True(t, seen["1.1.1.1"] || seen["2.2.2.2"], "some record should be returned")
 }
+
+// ── Geo-routing fallback chain (province → ISP → country → default → all) ──
+
+func TestGeoRouting_ProvinceISP_BothMatch(t *testing.T) {
+	// Province+ISP record beats province-only, ISP-only, and default.
+	recProvinceISP := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
+	recProvinceISP.RouteTags = "province=上海;isp=电信"
+	recProvince := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
+	recProvince.RouteTags = "province=上海"
+	recDefault := testutil.MakeA("www.example.com.", "3.3.3.3", 300, 0)
+	recDefault.RouteTags = ""
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recProvinceISP, recProvince, recDefault}
+		},
+	}
+	g := &fakeGeo{info: geo.GeoInfo{Country: "中国", Province: "上海", ISP: "电信"}}
+	h := newGeoHandler(store, g)
+
+	for i := 0; i < 20; i++ {
+		rw := testutil.NewFakeRW()
+		h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("1.2.3.4")))
+		require.Len(t, rw.LastMsg().Answer, 1)
+		assert.Equal(t, "1.1.1.1", rw.LastMsg().Answer[0].(*mdns.A).A.String(), "province+ISP record must win")
+	}
+}
+
+func TestGeoRouting_FallbackToProvinceOnly(t *testing.T) {
+	// No province+ISP record; should pick province-only over default.
+	recProvince := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
+	recProvince.RouteTags = "province=上海"
+	recDefault := testutil.MakeA("www.example.com.", "3.3.3.3", 300, 0)
+	recDefault.RouteTags = ""
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recProvince, recDefault}
+		},
+	}
+	g := &fakeGeo{info: geo.GeoInfo{Country: "中国", Province: "上海", ISP: "电信"}}
+	h := newGeoHandler(store, g)
+
+	rw := testutil.NewFakeRW()
+	h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("1.2.3.4")))
+	require.Len(t, rw.LastMsg().Answer, 1)
+	assert.Equal(t, "2.2.2.2", rw.LastMsg().Answer[0].(*mdns.A).A.String(), "province-only record must win over default")
+}
+
+func TestGeoRouting_FallbackToISPOnly(t *testing.T) {
+	// No province match; should pick ISP-only over default.
+	recISP := testutil.MakeA("www.example.com.", "4.4.4.4", 300, 0)
+	recISP.RouteTags = "isp=电信"
+	recDefault := testutil.MakeA("www.example.com.", "3.3.3.3", 300, 0)
+	recDefault.RouteTags = ""
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recISP, recDefault}
+		},
+	}
+	// Client is from Beijing Telecom (no province=北京 record, but isp=电信 exists)
+	g := &fakeGeo{info: geo.GeoInfo{Country: "中国", Province: "北京", ISP: "电信"}}
+	h := newGeoHandler(store, g)
+
+	rw := testutil.NewFakeRW()
+	h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("2.2.2.2")))
+	require.Len(t, rw.LastMsg().Answer, 1)
+	assert.Equal(t, "4.4.4.4", rw.LastMsg().Answer[0].(*mdns.A).A.String(), "ISP-only record must win over default")
+}
+
+func TestGeoRouting_FallbackToCountry(t *testing.T) {
+	// No province or ISP match; should pick country over default.
+	recCountry := testutil.MakeA("www.example.com.", "5.5.5.5", 300, 0)
+	recCountry.RouteTags = "country=中国"
+	recDefault := testutil.MakeA("www.example.com.", "3.3.3.3", 300, 0)
+	recDefault.RouteTags = ""
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recCountry, recDefault}
+		},
+	}
+	g := &fakeGeo{info: geo.GeoInfo{Country: "中国", Province: "上海", ISP: "电信"}}
+	h := newGeoHandler(store, g)
+
+	rw := testutil.NewFakeRW()
+	h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("1.2.3.4")))
+	require.Len(t, rw.LastMsg().Answer, 1)
+	assert.Equal(t, "5.5.5.5", rw.LastMsg().Answer[0].(*mdns.A).A.String(), "country record must win over default")
+}
+
+func TestGeoRouting_FallbackToAllWhenNoMatch(t *testing.T) {
+	// Client is overseas; only province/ISP/country records exist, no default.
+	// Should fall back to all records.
+	recShanghai := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
+	recShanghai.RouteTags = "province=上海"
+	recTelecom := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
+	recTelecom.RouteTags = "isp=电信"
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recShanghai, recTelecom}
+		},
+	}
+	g := &fakeGeo{info: geo.GeoInfo{Country: "美国", Province: "", ISP: ""}}
+	h := newGeoHandler(store, g)
+
+	seen := map[string]bool{}
+	for i := 0; i < 50; i++ {
+		rw := testutil.NewFakeRW()
+		h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("8.8.8.8")))
+		if len(rw.LastMsg().Answer) > 0 {
+			seen[rw.LastMsg().Answer[0].(*mdns.A).A.String()] = true
+		}
+	}
+	assert.True(t, seen["1.1.1.1"] || seen["2.2.2.2"], "all-records fallback should return some record")
+}
