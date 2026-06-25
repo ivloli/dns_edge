@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dns-edge GoEdge Provider 改造方案</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    line-height: 1.75;
+    color: #172b4d;
+    background: #fff;
+    padding: 32px 40px;
+    max-width: 1060px;
+  }
+  h1 { font-size: 26px; font-weight: 700; color: #0052cc; margin-bottom: 6px; }
+  h2 { font-size: 18px; font-weight: 600; color: #172b4d; margin: 36px 0 12px; padding-bottom: 6px; border-bottom: 2px solid #dfe1e6; }
+  h3 { font-size: 14px; font-weight: 600; color: #344563; margin: 20px 0 8px; }
+  h4 { font-size: 13px; font-weight: 600; color: #505f79; margin: 14px 0 6px; }
+  p { margin: 8px 0; }
+  .meta { color: #6b778c; font-size: 13px; margin-bottom: 28px; }
+  pre {
+    background: #1e2a3a;
+    color: #cdd9e5;
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin: 8px 0 14px;
+    overflow-x: auto;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  code {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    background: #f0f1f3;
+    border: 1px solid #dfe1e6;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 12.5px;
+    color: #c0392b;
+  }
+  pre code { background: none; border: none; padding: 0; color: inherit; font-size: inherit; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0 16px; font-size: 13px; }
+  th { background: #f4f5f7; color: #344563; font-weight: 600; text-align: left; padding: 9px 12px; border: 1px solid #dfe1e6; }
+  td { padding: 8px 12px; border: 1px solid #dfe1e6; vertical-align: top; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  .note {
+    background: #fffae6; border: 1px solid #ffe380; border-left: 4px solid #ffab00;
+    border-radius: 4px; padding: 10px 14px; margin: 12px 0; font-size: 13px;
+  }
+  .note strong { color: #ff8b00; }
+  .info {
+    background: #e6f0ff; border: 1px solid #b3d0ff; border-left: 4px solid #0052cc;
+    border-radius: 4px; padding: 10px 14px; margin: 12px 0; font-size: 13px;
+  }
+  .badge {
+    display: inline-block; background: #0052cc; color: #fff;
+    border-radius: 3px; padding: 1px 7px; font-size: 11px; font-weight: 700;
+    margin-right: 6px; vertical-align: middle;
+  }
+  .badge.green { background: #00875a; }
+  .badge.orange { background: #ff8b00; }
+  .badge.gray { background: #6b778c; }
+  .arch {
+    background: #f4f5f7; border: 1px solid #dfe1e6; border-radius: 6px;
+    padding: 16px 20px; margin: 12px 0; font-family: monospace; font-size: 13px;
+    white-space: pre; line-height: 1.6; overflow-x: auto;
+  }
+  ul { margin: 8px 0 8px 20px; }
+  li { margin: 4px 0; }
+  .phase-table td:first-child { font-weight: 600; white-space: nowrap; }
+  .section-num { color: #0052cc; margin-right: 6px; }
+  hr { border: none; border-top: 1px solid #dfe1e6; margin: 32px 0; }
+</style>
+</head>
+<body>
+
+<h1>dns-edge GoEdge Provider 改造方案</h1>
+<p class="meta">版本：v1.0 &nbsp;·&nbsp; 日期：2026-06-24 &nbsp;·&nbsp; 分支：<code>feature/goedge-provider</code></p>
+
+<!-- 1 背景 -->
+<h2><span class="section-num">1.</span>背景与目标</h2>
+<h3>1.1 背景</h3>
+<p>dns-edge 当前架构直连 PostgreSQL 和 Nacos，适合中心化单集群部署。公司计划将 dns-edge 作为 GoEdge CDN 平台的 DNS 提供商之一，部署在全球各边缘节点。边缘节点无法直连中心 DB 和 Nacos，所有数据获取和配置管理必须通过 GoEdge EdgeAPI（中心 API 服务）进行。</p>
+
+<h3>1.2 目标</h3>
+<ul>
+  <li><strong>实现 GoEdge DNS Provider 接口</strong>：dns-edge 暴露符合 GoEdge <code>EdgeDNSAPIProvider</code> 规范的 HTTP API，使 GoEdge 能将 dns-edge 作为 DNS 提供商管理域名和记录。</li>
+  <li><strong>去除直连依赖</strong>：移除对 PostgreSQL 和 Nacos 的直连，改为通过 EdgeAPI 获取数据。</li>
+  <li><strong>适配边缘部署</strong>：dns-edge 作为纯边缘服务运行，启动时从 EdgeAPI 拉取全量数据，运行时定时同步保持一致。</li>
+</ul>
+
+<!-- 2 接口规范 -->
+<h2><span class="section-num">2.</span>GoEdge Provider 接口规范</h2>
+
+<h3>2.1 鉴权机制</h3>
+<p>所有 API 请求在 Header 中携带 Access Token：</p>
+<pre>X-Edge-Access-Token: &lt;token&gt;</pre>
+<p>Token 通过独立接口获取，有效期内复用，到期前 600 秒刷新。</p>
+
+<h4>获取 Token</h4>
+<pre>POST /APIAccessTokenService/getAPIAccessToken</pre>
+<pre>{
+  "type": "user",
+  "accessKeyId": "&lt;key_id&gt;",
+  "accessKey": "&lt;key_secret&gt;"
+}</pre>
+<pre>{
+  "code": 200,
+  "message": "",
+  "data": {
+    "token": "&lt;access_token&gt;",
+    "expiresAt": 1751000000
+  }
+}</pre>
+
+<h3>2.2 统一响应格式</h3>
+<pre>{
+  "code": 200,       // 200 = 成功，其他值为错误
+  "message": "",     // 错误描述
+  "data": { ... }    // 业务数据
+}</pre>
+
+<h3>2.3 域名（Zone）接口</h3>
+<table>
+  <thead>
+    <tr><th>接口路径</th><th>请求参数</th><th>响应 data 字段</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>POST /NSDomainService/ListNSDomains</code></td>
+      <td><code>offset</code> int<br><code>size</code> int</td>
+      <td><code>nsDomains[]</code><br>（id, name, isOn, isDeleted）</td>
+      <td>分页列出所有 zone</td>
+    </tr>
+    <tr>
+      <td><code>POST /NSDomainService/FindNSDomainWithName</code></td>
+      <td><code>name</code> string</td>
+      <td><code>nsDomain</code>（id, name）</td>
+      <td>按名称查 zone，不存在时 id = 0</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>2.4 记录（Record）接口</h3>
+<table>
+  <thead>
+    <tr><th>接口路径</th><th>请求参数</th><th>响应 data 字段</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>POST /NSRecordService/ListNSRecords</code></td>
+      <td><code>nsDomainId</code> int64<br><code>offset</code> int<br><code>size</code> int</td>
+      <td><code>nsRecords[]</code><br>（id, name, type, value, ttl, nsRoutes）</td>
+      <td>按 zone ID 分页列出记录</td>
+    </tr>
+    <tr>
+      <td><code>POST /NSRecordService/FindNSRecordWithNameAndType</code></td>
+      <td><code>nsDomainId</code> int64<br><code>name</code> string<br><code>type</code> string</td>
+      <td><code>nsRecord</code>（同上）</td>
+      <td>查询单条记录，不存在时 id = 0</td>
+    </tr>
+    <tr>
+      <td><code>POST /NSRecordService/FindNSRecordsWithNameAndType</code></td>
+      <td><code>nsDomainId</code> int64<br><code>name</code> string<br><code>type</code> string</td>
+      <td><code>nsRecords[]</code></td>
+      <td>查询多条（同名同类型多值）</td>
+    </tr>
+    <tr>
+      <td><code>POST /NSRecordService/CreateNSRecord</code></td>
+      <td><code>nsDomainId</code> int64<br><code>name</code> string<br><code>type</code> string<br><code>value</code> string<br><code>ttl</code> int32<br><code>nsRouteCodes</code> []string</td>
+      <td><code>nsRecordId</code> int64</td>
+      <td>创建记录</td>
+    </tr>
+    <tr>
+      <td><code>POST /NSRecordService/UpdateNSRecord</code></td>
+      <td><code>nsRecordId</code> int64<br><code>name</code> string<br><code>type</code> string<br><code>value</code> string<br><code>ttl</code> int32<br><code>nsRouteCodes</code> []string<br><code>isOn</code> bool</td>
+      <td>—（code 200 即成功）</td>
+      <td>更新记录</td>
+    </tr>
+    <tr>
+      <td><code>POST /NSRecordService/DeleteNSRecord</code></td>
+      <td><code>nsRecordId</code> int64</td>
+      <td>—（code 200 即成功）</td>
+      <td>删除记录</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>2.5 线路（Route）接口</h3>
+<p>GoEdge 用线路（Route）实现 GeoDNS / 分运营商解析。dns-edge 当前不支持 GeoDNS，暂时只返回默认线路，其他线路接口返回空列表。</p>
+<table>
+  <thead>
+    <tr><th>接口路径</th><th>说明</th><th>当前实现</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>POST /NSRouteService/FindAllDefaultWorldRegionRoutes</code></td><td>世界区域线路</td><td>返回空列表</td></tr>
+    <tr><td><code>POST /NSRouteService/FindAllDefaultChinaProvinceRoutes</code></td><td>中国省份线路</td><td>返回空列表</td></tr>
+    <tr><td><code>POST /NSRouteService/FindAllDefaultISPRoutes</code></td><td>ISP 线路</td><td>返回空列表</td></tr>
+    <tr><td><code>POST /NSRouteService/FindAllAgentNSRoutes</code></td><td>Agent 线路</td><td>返回空列表（GoEdge 会忽略失败）</td></tr>
+    <tr><td><code>POST /NSRouteService/FindAllNSRoutes</code></td><td>自定义线路</td><td>返回空列表</td></tr>
+  </tbody>
+</table>
+<div class="note"><strong>注：</strong>GoEdge 源码注释明确说明调用 <code>FindAllAgentNSRoutes</code> 失败时会忽略错误（兼容老版本），可以放心返回 404 或空列表。</div>
+
+<!-- 3 架构 -->
+<h2><span class="section-num">3.</span>架构改造方案</h2>
+
+<h3>3.1 当前架构</h3>
+<div class="arch">
+┌──────────────────────────────────────────────────────┐
+│  dns-edge                                            │
+│                                                      │
+│  [DNS Handler] ── ZoneStore（内存） ── [PG Syncer]   │
+│       │                                    │         │
+│  [HTTP API]                         PostgreSQL       │
+│                                            │         │
+│                                     Nacos（权重）    │
+└──────────────────────────────────────────────────────┘</div>
+
+<h3>3.2 目标架构</h3>
+<div class="arch">
+                ┌──────────────────────────────┐
+                │  GoEdge EdgeAPI（中心）        │
+                │  · 域名/记录管理              │
+                │  · 权重配置                   │
+                │  · AccessToken 颁发           │
+                └──────────────┬───────────────┘
+                               │ HTTP (EdgeAPI 协议)
+       ┌───────────────────────┼───────────────────────┐
+       ▼                       ▼                       ▼
+┌─────────────┐       ┌─────────────┐       ┌─────────────┐
+│ dns-edge    │       │ dns-edge    │       │ dns-edge    │
+│ 边缘节点 A  │       │ 边缘节点 B  │       │ 边缘节点 C  │
+│             │       │             │       │             │
+│ DNS Handler │       │ DNS Handler │       │ DNS Handler │
+│ ZoneStore   │       │ ZoneStore   │       │ ZoneStore   │
+│ GoEdge API  │       │ GoEdge API  │       │ GoEdge API  │
+│ EdgeAPI Sync│       │ EdgeAPI Sync│       │ EdgeAPI Sync│
+└─────────────┘       └─────────────┘       └─────────────┘</div>
+
+<h3>3.3 核心变化对比</h3>
+<table>
+  <thead><tr><th>组件</th><th>现在</th><th>改造后</th></tr></thead>
+  <tbody>
+    <tr><td>数据来源</td><td>PostgreSQL 直连</td><td>EdgeAPI HTTP 拉取</td></tr>
+    <tr><td>权重配置</td><td>Nacos ListenConfig</td><td>EdgeAPI 权重接口 / NSRoute</td></tr>
+    <tr><td>记录写入</td><td>PG INSERT/UPDATE</td><td>EdgeAPI CreateNSRecord / UpdateNSRecord</td></tr>
+    <tr><td>启动全量加载</td><td>SELECT * FROM records</td><td>ListNSDomains + ListNSRecords 分页</td></tr>
+    <tr><td>增量同步</td><td>PG WHERE updated_at &gt; ?</td><td>定时全量重拉（无增量接口）</td></tr>
+    <tr><td>配置文件</td><td>postgres { dsn } + nacos { }</td><td>edgeapi { host accessKeyId }</td></tr>
+  </tbody>
+</table>
+
+<!-- 4 配置 -->
+<h2><span class="section-num">4.</span>新配置块设计</h2>
+<p>移除 <code>postgres</code> 和 <code>nacos</code> 块，新增 <code>edgeapi</code> 块：</p>
+<pre>dns-edge {
+    listen   :15300
+    workers  0
+    tcp      true
+
+    api {
+        listen :28082
+    }
+
+    edgeapi {
+        host           https://edge-api.example.com
+        access_key_id  &lt;key_id&gt;
+        access_key     &lt;key_secret&gt;
+        role           user          # user | admin，默认 user
+        sync_interval  30s           # 全量同步间隔，默认 30s
+        timeout        10s           # 单次请求超时，默认 10s
+    }
+
+    sync {
+        interval  30s
+        prob      0.01
+        ratelimit 100
+    }
+}</pre>
+
+<!-- 5 数据流 -->
+<h2><span class="section-num">5.</span>数据流设计</h2>
+
+<h3>5.1 启动流程</h3>
+<div class="arch">
+启动
+  │
+  ├─ 1. 解析配置（edgeapi block）
+  ├─ 2. EdgeAPI Client 初始化，获取 AccessToken
+  ├─ 3. ListNSDomains 分页拉取全部 Zone
+  ├─ 4. 对每个 Zone：ListNSRecords 分页拉取全部 Record
+  ├─ 5. 构建 ZoneStore（内存）
+  ├─ 6. 启动 DNS Handler
+  ├─ 7. 启动 GoEdge Provider HTTP API
+  └─ 8. 启动 EdgeAPI Syncer（定时全量同步）</div>
+
+<h3>5.2 同步策略</h3>
+<table>
+  <thead><tr><th>场景</th><th>策略</th></tr></thead>
+  <tbody>
+    <tr><td>正常运行</td><td>每 30s 全量拉取（所有 Zone + Record），替换内存</td></tr>
+    <tr><td>GoEdge 写入</td><td>GoEdge 通过 Provider API 写入后，dns-edge 直接更新内存（写路径双写）</td></tr>
+    <tr><td>启动时 EdgeAPI 不可达</td><td>待确认：拒绝启动 or 允许带空数据启动</td></tr>
+  </tbody>
+</table>
+
+<h3>5.3 写路径（GoEdge → dns-edge）</h3>
+<div class="arch">
+GoEdge EdgeAdmin
+  │
+  │ POST /NSRecordService/CreateNSRecord
+  ▼
+dns-edge GoEdge API 层
+  │
+  ├─ 1. 转换为内部 Record 格式
+  ├─ 2. 调用 EdgeAPI CreateNSRecord（写到中心）
+  ├─ 3. 更新本实例 ZoneStore（内存热更新）
+  └─ 4. 返回 { "code": 200, "data": { "nsRecordId": ... } }</div>
+
+<div class="note"><strong>注：</strong>dns-edge 自身不再是数据 source of truth，EdgeAPI 才是。写操作先透传到 EdgeAPI，再更新本地内存。</div>
+
+<!-- 6 模块规划 -->
+<h2><span class="section-num">6.</span>新增模块规划</h2>
+
+<h3>6.1 <code>internal/edgeapi/</code> — EdgeAPI 客户端</h3>
+<pre>internal/edgeapi/
+  client.go    # HTTP 客户端，Token 管理，doAPI()
+  types.go     # 请求/响应类型
+  zone.go      # ListNSDomains, FindNSDomainWithName
+  record.go    # ListNSRecords, FindNSRecord*, Create/Update/DeleteNSRecord
+  route.go     # FindAllXxxRoutes</pre>
+
+<h3>6.2 <code>internal/api/goedge.go</code> — GoEdge Provider API</h3>
+<p>在现有 Gin 服务中新增路由组，暴露 GoEdge 期望的接口：</p>
+<pre>/APIAccessTokenService/getAPIAccessToken       POST
+/NSDomainService/ListNSDomains                 POST
+/NSDomainService/FindNSDomainWithName          POST
+/NSRecordService/ListNSRecords                 POST
+/NSRecordService/FindNSRecordWithNameAndType   POST
+/NSRecordService/FindNSRecordsWithNameAndType  POST
+/NSRecordService/CreateNSRecord                POST
+/NSRecordService/UpdateNSRecord                POST
+/NSRecordService/DeleteNSRecord                POST
+/NSRouteService/FindAllDefaultWorldRegionRoutes     POST
+/NSRouteService/FindAllDefaultChinaProvinceRoutes   POST
+/NSRouteService/FindAllDefaultISPRoutes             POST
+/NSRouteService/FindAllAgentNSRoutes                POST
+/NSRouteService/FindAllNSRoutes                     POST</pre>
+
+<h3>6.3 <code>internal/syncer/edgeapi_syncer.go</code> — 全量同步器</h3>
+<p>替换现有 PG Syncer，改为通过 EdgeAPI 全量拉取。</p>
+
+<h3>6.4 配置层变化</h3>
+<ul>
+  <li>移除 <code>PostgresConfig</code>、<code>NacosConfig</code></li>
+  <li>新增 <code>EdgeAPIConfig</code></li>
+  <li>Corefile parser 新增 <code>edgeapi</code> 块解析</li>
+</ul>
+
+<!-- 7 兼容性 -->
+<h2><span class="section-num">7.</span>兼容性与迁移</h2>
+<table>
+  <thead><tr><th>方面</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>内部 REST API</td><td>现有 <code>/api/v1/domains</code> 等接口继续保留，供本地调试使用</td></tr>
+    <tr><td>配置迁移</td><td><code>postgres { dsn }</code> → <code>edgeapi { host }</code>；<code>nacos { }</code> 块移除</td></tr>
+    <tr><td>数据库</td><td>移除 PG 依赖，<code>--auto-migrate</code> 标志废弃</td></tr>
+  </tbody>
+</table>
+
+<!-- 8 开发阶段 -->
+<h2><span class="section-num">8.</span>开发阶段规划</h2>
+<table class="phase-table">
+  <thead><tr><th>阶段</th><th>内容</th><th>预估工作量</th></tr></thead>
+  <tbody>
+    <tr><td>P1</td><td><code>internal/edgeapi/</code> 客户端（Token + Zone + Record CRUD）</td><td>2 天</td></tr>
+    <tr><td>P2</td><td>配置层改造（新增 <code>edgeapi</code> 块，移除 <code>postgres</code>/<code>nacos</code>）</td><td>0.5 天</td></tr>
+    <tr><td>P3</td><td>EdgeAPI Syncer（全量同步，替换 PG Syncer）</td><td>1 天</td></tr>
+    <tr><td>P4</td><td>GoEdge Provider API（路由组实现）</td><td>1.5 天</td></tr>
+    <tr><td>P5</td><td>鉴权中间件（AccessKeyId/Secret 校验，Token 颁发）</td><td>0.5 天</td></tr>
+    <tr><td>P6</td><td>集成测试 + 与 GoEdge 联调</td><td>2 天</td></tr>
+  </tbody>
+</table>
+
+<!-- 9 待确认 -->
+<h2><span class="section-num">9.</span>待确认事项</h2>
+<table>
+  <thead><tr><th>#</th><th>问题</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>EdgeAPI 地址</td><td>部署在哪个域名/IP？是否需要 TLS？</td></tr>
+    <tr><td>2</td><td>accessKeyId / accessKeySecret</td><td>由 EdgeAPI 管理员在 EdgeAdmin 后台创建，需提前申请</td></tr>
+    <tr><td>3</td><td>权重（分流）映射</td><td>GoEdge NSRoute 与 dns-edge 现有 weight 字段如何对接？是否保留 weight 字段？</td></tr>
+    <tr><td>4</td><td>EdgeAPI 不可达时的启动行为</td><td>拒绝启动 or 允许带空数据启动待同步后生效？</td></tr>
+    <tr><td>5</td><td>内部 REST API 写操作</td><td>是否允许绕过 EdgeAPI 直接写？若允许，如何同步到中心？</td></tr>
+  </tbody>
+</table>
+
+</body>
+</html>
