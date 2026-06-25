@@ -161,3 +161,30 @@
 - [x] `internal/api/server.go` 注册路由 + 存 secret
 - [ ] GoEdge Provider 接口单元测试（mock GoEdge 请求，覆盖各 action + 鉴权）
 - [ ] 与 GoEdge 联调测试
+
+### 阶段 12：dns-control 中心控制服务（待开始）
+> 方案文档：docs/dns-control-design.md
+- [ ] P1：`cmd/dns-control/` 骨架 + `/v1/sync/incremental` 接口
+- [ ] P2：SSE 权重推送 + Nacos 回调 fan-out
+- [ ] P3：`internal/control/` 客户端（dns-edge 侧替换 pg/nacos 直连）
+- [ ] P4：配置层改造（移除 `postgres`/`nacos` 块，新增 `control` 块）
+- [ ] P5：单元测试 + 集成测试
+- [ ] P6：部署文档
+
+待确认：
+- dns-control 写路径（GoEdge AddRecord 是走 dns-control 代理还是 dns-edge 直接写 PG？）
+- 鉴权方式（Bearer Token 还是 mTLS？）
+
+### 阶段 13：ECS 地理路由（待开始）
+> 方案文档：docs/ecs-geo-routing-design.md
+- [ ] P1：`internal/geo/` 包（xdb 封装 + 字典树 GeoRouter）
+- [ ] P2：Corefile `geo { xdb ... }` 块解析 + 启动加载
+- [ ] P3：ServeDNS 集成（ECS clientIP → GeoRouter → 加权随机）
+- [ ] P4：PG 路由规则存储（route_tags 字段或独立 routes 表）
+- [ ] P5：单元测试
+
+待确认：
+- 路由规则存储方案（route_tags 字段 vs 独立 routes 表）
+- 是否需要城市粒度（ip2region 城市数据覆盖率参差不齐）
+- xdb 热更新还是重启节点即可
+
