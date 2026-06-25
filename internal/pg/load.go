@@ -19,7 +19,8 @@ SELECT
     r.type  AS rec_type,
     r.ttl,
     r.value,
-    r.weight
+    r.weight,
+    r.route_tags
 FROM zones z
 JOIN records r ON r.zone_id = z.id
 WHERE z.deleted_at IS NULL
@@ -45,11 +46,11 @@ func (s *Store) LoadAll(ctx context.Context, zoneStore iface.ZoneStore) error {
 
 	for rows.Next() {
 		var (
-			zoneName, recName, recType, value string
-			id                                int64
-			ttl, weight                       int
+			zoneName, recName, recType, value, routeTags string
+			id                                            int64
+			ttl, weight                                   int
 		)
-		if err := rows.Scan(&zoneName, &id, &recName, &recType, &ttl, &value, &weight); err != nil {
+		if err := rows.Scan(&zoneName, &id, &recName, &recType, &ttl, &value, &weight, &routeTags); err != nil {
 			return fmt.Errorf("pg load: scan: %w", err)
 		}
 
@@ -85,13 +86,14 @@ func (s *Store) LoadAll(ctx context.Context, zoneStore iface.ZoneStore) error {
 
 		key := iface.RecordKey{Name: recName, Qtype: qtype}
 		zone.Records[key] = append(zone.Records[key], &iface.Record{
-			ID:     id,
-			Name:   recName,
-			Type:   qtype,
-			TTL:    uint32(ttl),
-			Value:  value,
-			Weight: weight,
-			RR:     rr,
+			ID:        id,
+			Name:      recName,
+			Type:      qtype,
+			TTL:       uint32(ttl),
+			Value:     value,
+			Weight:    weight,
+			RouteTags: routeTags,
+			RR:        rr,
 		})
 		loaded++
 	}

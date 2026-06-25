@@ -261,12 +261,16 @@ func (s *Server) verifyGoEdgeToken(c *gin.Context) bool {
 // ── conversion helpers ────────────────────────────────────────────────────────
 
 func toGeRecord(r *iface.Record) goedgeRecord {
+	route := r.RouteTags
+	if route == "" {
+		route = "default"
+	}
 	return goedgeRecord{
 		ID:    strconv.FormatInt(r.ID, 10),
 		Name:  r.Name,
 		Type:  mdns.TypeToString[r.Type],
 		Value: r.Value,
-		Route: "default",
+		Route: route,
 		TTL:   r.TTL,
 	}
 }
@@ -291,7 +295,11 @@ func geToRecord(gr *goedgeRecord) (*iface.Record, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid rdata: %w", err)
 	}
-	return &iface.Record{Name: name, Type: qtype, TTL: gr.TTL, Value: gr.Value, RR: rr}, nil
+	routeTags := gr.Route
+	if routeTags == "default" {
+		routeTags = ""
+	}
+	return &iface.Record{Name: name, Type: qtype, TTL: gr.TTL, Value: gr.Value, RouteTags: routeTags, RR: rr}, nil
 }
 
 // geZoneErr writes an appropriate HTTP error for a GetZone failure.

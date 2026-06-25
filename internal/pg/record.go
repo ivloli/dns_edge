@@ -15,27 +15,27 @@ import (
 var _ iface.RecordStore = (*Store)(nil)
 
 const queryCreateRecord = `
-INSERT INTO records(zone_id, name, type, ttl, value, weight)
-VALUES($1, $2, $3, $4, $5, $6)
+INSERT INTO records(zone_id, name, type, ttl, value, weight, route_tags)
+VALUES($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT ON CONSTRAINT records_unique_active_rrset DO NOTHING
-RETURNING id, name, type, ttl, value, weight`
+RETURNING id, name, type, ttl, value, weight, route_tags`
 
 const queryGetExistingRecord = `
-SELECT id, name, type, ttl, value, weight FROM records
+SELECT id, name, type, ttl, value, weight, route_tags FROM records
 WHERE zone_id=$1 AND name=$2 AND type=$3 AND value=$4 AND deleted_at IS NULL`
 
 const queryUpdateRecord = `
 UPDATE records
-SET name=$3, type=$4, ttl=$5, value=$6, weight=$7, deleted_at=NULL
+SET name=$3, type=$4, ttl=$5, value=$6, weight=$7, route_tags=$8, deleted_at=NULL
 WHERE id=$1 AND zone_id=$2
-RETURNING id, name, type, ttl, value, weight`
+RETURNING id, name, type, ttl, value, weight, route_tags`
 
 const querySoftDeleteRecord = `
 UPDATE records SET deleted_at=NOW()
 WHERE id=$1 AND zone_id=$2 AND deleted_at IS NULL`
 
 const queryListRecords = `
-SELECT r.id, r.name, r.type, r.ttl, r.value, r.weight
+SELECT r.id, r.name, r.type, r.ttl, r.value, r.weight, r.route_tags
 FROM records r
 JOIN zones z ON r.zone_id = z.id
 WHERE z.name=$1 AND z.deleted_at IS NULL AND r.deleted_at IS NULL
@@ -54,8 +54,8 @@ func (s *Store) CreateRecord(ctx context.Context, zoneID int64, rec *iface.Recor
 	var out iface.Record
 	var typName string
 	err := s.pool.QueryRow(ctx, queryCreateRecord,
-		zoneID, rec.Name, typStr, rec.TTL, rec.Value, rec.Weight).
-		Scan(&out.ID, &out.Name, &typName, &out.TTL, &out.Value, &out.Weight)
+		zoneID, rec.Name, typStr, rec.TTL, rec.Value, rec.Weight, rec.RouteTags).
+		Scan(&out.ID, &out.Name, &typName, &out.TTL, &out.Value, &out.Weight, &out.RouteTags)
 	if err == nil {
 		// New row inserted.
 		out.Type = mdns.StringToType[typName]
@@ -72,7 +72,7 @@ func (s *Store) CreateRecord(ctx context.Context, zoneID int64, rec *iface.Recor
 	// ON CONFLICT DO NOTHING fired — fetch the existing active record.
 	err = s.pool.QueryRow(ctx, queryGetExistingRecord,
 		zoneID, rec.Name, typStr, rec.Value).
-		Scan(&out.ID, &out.Name, &typName, &out.TTL, &out.Value, &out.Weight)
+		Scan(&out.ID, &out.Name, &typName, &out.TTL, &out.Value, &out.Weight, &out.RouteTags)
 	if err != nil {
 		return nil, false, fmt.Errorf("pg: create record: fetch existing: %w", err)
 	}
@@ -96,8 +96,8 @@ func (s *Store) UpdateRecord(ctx context.Context, zoneID, id int64, rec *iface.R
 	var out iface.Record
 	var typName string
 	err := s.pool.QueryRow(ctx, queryUpdateRecord,
-		id, zoneID, rec.Name, typStr, rec.TTL, rec.Value, rec.Weight).
-		Scan(&out.ID, &out.Name, &typName, &out.TTL, &out.Value, &out.Weight)
+		id, zoneID, rec.Name, typStr, rec.TTL, rec.Value, rec.Weight, rec.RouteTags).
+		Scan(&out.ID, &out.Name, &typName, &out.TTL, &out.Value, &out.Weight, &out.RouteTags)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -142,7 +142,7 @@ func (s *Store) ListRecords(ctx context.Context, apex string) ([]*iface.Record, 
 	for rows.Next() {
 		var r iface.Record
 		var typName string
-		if err := rows.Scan(&r.ID, &r.Name, &typName, &r.TTL, &r.Value, &r.Weight); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &typName, &r.TTL, &r.Value, &r.Weight, &r.RouteTags); err != nil {
 			return nil, fmt.Errorf("pg: list records: scan: %w", err)
 		}
 		r.Type = mdns.StringToType[typName]

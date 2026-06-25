@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS records (
     ttl        INTEGER      NOT NULL DEFAULT 300,
     value      TEXT         NOT NULL,
     weight     INTEGER      NOT NULL DEFAULT 0,
+    route_tags TEXT         NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ

@@ -14,30 +14,33 @@ import (
 )
 
 type recordReq struct {
-	Name   string `json:"name"   binding:"required"`
-	Type   string `json:"type"   binding:"required"`
-	TTL    uint32 `json:"ttl"    binding:"required,min=1"`
-	Value  string `json:"value"  binding:"required"`
-	Weight int    `json:"weight"`
+	Name      string `json:"name"       binding:"required"`
+	Type      string `json:"type"       binding:"required"`
+	TTL       uint32 `json:"ttl"        binding:"required,min=1"`
+	Value     string `json:"value"      binding:"required"`
+	Weight    int    `json:"weight"`
+	RouteTags string `json:"route_tags"` // e.g. "country=中国;isp=电信;province=上海"; empty = default
 }
 
 type recordResp struct {
-	ID     int64  `json:"id"`
-	Name   string `json:"name"`
-	Type   string `json:"type"`
-	TTL    uint32 `json:"ttl"`
-	Value  string `json:"value"`
-	Weight int    `json:"weight"`
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Type      string `json:"type"`
+	TTL       uint32 `json:"ttl"`
+	Value     string `json:"value"`
+	Weight    int    `json:"weight"`
+	RouteTags string `json:"route_tags"`
 }
 
 func toResp(r *iface.Record) recordResp {
 	return recordResp{
-		ID:     r.ID,
-		Name:   r.Name,
-		Type:   mdns.TypeToString[r.Type],
-		TTL:    r.TTL,
-		Value:  r.Value,
-		Weight: r.Weight,
+		ID:        r.ID,
+		Name:      r.Name,
+		Type:      mdns.TypeToString[r.Type],
+		TTL:       r.TTL,
+		Value:     r.Value,
+		Weight:    r.Weight,
+		RouteTags: r.RouteTags,
 	}
 }
 
@@ -93,7 +96,7 @@ func (s *Server) createRecord(c *gin.Context) {
 		return
 	}
 
-	rec := &iface.Record{Name: name, Type: qtype, TTL: req.TTL, Value: req.Value, Weight: req.Weight, RR: rr}
+	rec := &iface.Record{Name: name, Type: qtype, TTL: req.TTL, Value: req.Value, Weight: req.Weight, RouteTags: req.RouteTags, RR: rr}
 	created, isNew, err := s.pg.CreateRecord(ctx, zone.ID, rec)
 	if err != nil {
 		s.jsonError(c, http.StatusInternalServerError, err)
@@ -151,7 +154,7 @@ func (s *Server) updateRecord(c *gin.Context) {
 		return
 	}
 
-	rec := &iface.Record{ID: id, Name: name, Type: qtype, TTL: req.TTL, Value: req.Value, Weight: req.Weight, RR: rr}
+	rec := &iface.Record{ID: id, Name: name, Type: qtype, TTL: req.TTL, Value: req.Value, Weight: req.Weight, RouteTags: req.RouteTags, RR: rr}
 	updated, err := s.pg.UpdateRecord(ctx, zone.ID, id, rec)
 	if err != nil {
 		if errors.Is(err, pg.ErrNotFound) {

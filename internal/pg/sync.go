@@ -24,6 +24,7 @@ SELECT z.name   AS apex,
        r.ttl,
        r.value,
        r.weight,
+       r.route_tags,
        r.deleted_at IS NOT NULL AS is_deleted
 FROM records r
 JOIN zones z ON r.zone_id = z.id
@@ -70,12 +71,12 @@ func (s *Store) IncrementalLoad(ctx context.Context, since time.Time, zoneStore 
 	updated, deleted, skipped := 0, 0, 0
 	for rrows.Next() {
 		var (
-			apex, recName, typStr, value string
-			id                           int64
-			ttl, weight                  int
-			isDeleted                    bool
+			apex, recName, typStr, value, routeTags string
+			id                                       int64
+			ttl, weight                              int
+			isDeleted                                bool
 		)
-		if err := rrows.Scan(&apex, &id, &recName, &typStr, &ttl, &value, &weight, &isDeleted); err != nil {
+		if err := rrows.Scan(&apex, &id, &recName, &typStr, &ttl, &value, &weight, &routeTags, &isDeleted); err != nil {
 			return fmt.Errorf("pg: incremental records: scan: %w", err)
 		}
 
@@ -106,7 +107,7 @@ func (s *Store) IncrementalLoad(ctx context.Context, since time.Time, zoneStore 
 
 		rec := &iface.Record{
 			ID: id, Name: recName, Type: qtype,
-			TTL: uint32(ttl), Value: value, Weight: weight, RR: rr,
+			TTL: uint32(ttl), Value: value, Weight: weight, RouteTags: routeTags, RR: rr,
 		}
 		if err := zoneStore.PutRecord(apex, rec); err != nil {
 			s.log.Error("incremental: PutRecord failed", zap.Error(err))

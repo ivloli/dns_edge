@@ -25,13 +25,14 @@ type ZoneMeta struct {
 
 // Record is a single DNS resource record, optionally weighted for traffic splitting.
 type Record struct {
-	ID     int64  // PostgreSQL row ID; 0 for in-memory-only records
-	Name   string // owner name as FQDN with trailing dot, e.g. "www.example.com."
-	Type   uint16 // dns.TypeA, dns.TypeAAAA, dns.TypeCNAME, …
-	TTL    uint32
-	Value  string // text form of rdata, e.g. "1.2.3.4"
-	Weight int    // static weight; 0 = equal distribution
-	RR     dns.RR // pre-parsed resource record; populated when the record is stored
+	ID        int64  // PostgreSQL row ID; 0 for in-memory-only records
+	Name      string // owner name as FQDN with trailing dot, e.g. "www.example.com."
+	Type      uint16 // dns.TypeA, dns.TypeAAAA, dns.TypeCNAME, …
+	TTL       uint32
+	Value     string // text form of rdata, e.g. "1.2.3.4"
+	Weight    int    // static weight; 0 = equal distribution
+	RouteTags string // geo-routing tag, e.g. "country=中国;isp=电信;province=上海"; empty = default route
+	RR        dns.RR // pre-parsed resource record; populated when the record is stored
 }
 
 // Zone holds every record under a DNS zone apex.

@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS records (
     ttl        INTEGER      NOT NULL DEFAULT 300,
     value      TEXT         NOT NULL,              -- rdata 文本形式，例 "1.2.3.4"
     weight     INTEGER      NOT NULL DEFAULT 0,   -- 静态权重（0 = 均等）
+    route_tags TEXT         NOT NULL DEFAULT '',  -- 地理路由标签，例 "country=中国;isp=电信;province=上海"；空串 = default
     created_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ
