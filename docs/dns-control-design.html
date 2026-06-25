@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dns-control 中心控制服务方案</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; line-height: 1.7; color: #172B4D; margin: 0; padding: 32px 48px; max-width: 960px; }
+  h1 { font-size: 24px; font-weight: 700; color: #0052CC; border-bottom: 2px solid #0052CC; padding-bottom: 10px; margin-top: 0; }
+  h2 { font-size: 18px; font-weight: 700; color: #0052CC; border-left: 4px solid #0052CC; padding-left: 10px; margin-top: 36px; }
+  h3 { font-size: 15px; font-weight: 700; color: #172B4D; margin-top: 24px; }
+  .meta { color: #6B778C; font-size: 13px; margin-bottom: 28px; }
+  .meta span { margin-right: 24px; }
+  pre { background: #F4F5F7; border: 1px solid #DFE1E6; border-radius: 4px; padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  code { background: #F4F5F7; border: 1px solid #DFE1E6; border-radius: 3px; padding: 1px 5px; font-size: 12.5px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+  pre code { background: none; border: none; padding: 0; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 13px; }
+  th { background: #0052CC; color: #fff; padding: 9px 14px; text-align: left; font-weight: 600; }
+  td { padding: 8px 14px; border-bottom: 1px solid #DFE1E6; }
+  tr:nth-child(even) td { background: #F4F5F7; }
+  .problem-list { list-style: none; padding: 0; margin: 12px 0; }
+  .problem-list li { padding: 7px 12px; margin-bottom: 6px; border-radius: 4px; border-left: 4px solid; }
+  .problem-list li:nth-child(1) { background: #FFEBE6; border-color: #FF5630; }
+  .problem-list li:nth-child(2) { background: #FFFAE6; border-color: #FFAB00; }
+  .problem-list li:nth-child(3) { background: #FFFAE6; border-color: #FFAB00; }
+  .problem-list li:nth-child(4) { background: #FFEBE6; border-color: #FF5630; }
+  strong { color: #172B4D; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 12px; font-weight: 600; }
+  .badge-get { background: #E3FCEF; color: #006644; }
+  .badge-post { background: #E0F0FF; color: #0052CC; }
+  .todo-list { list-style: none; padding: 0; }
+  .todo-list li { padding: 5px 0; border-bottom: 1px solid #F4F5F7; }
+  .todo-list li::before { content: "□ "; color: #6B778C; }
+  .todo-list li.done::before { content: "✓ "; color: #36B37E; }
+  .section-note { background: #DEEBFF; border: 1px solid #B3D4FF; border-radius: 4px; padding: 12px 16px; margin: 12px 0; font-size: 13px; }
+  hr { border: none; border-top: 1px solid #DFE1E6; margin: 32px 0; }
+  .arch-box { background: #F4F5F7; border: 1px solid #DFE1E6; border-radius: 6px; padding: 20px 24px; margin: 16px 0; }
+  .arch-box pre { background: none; border: none; padding: 0; margin: 0; }
+</style>
+</head>
+<body>
+
+<h1>dns-control 中心控制服务方案</h1>
+<div class="meta">
+  <span>版本：v1.0</span>
+  <span>日期：2026-06-25</span>
+  <span>状态：设计评审中</span>
+</div>
+
+<h2>1. 背景与问题</h2>
+
+<p>当前 dns-edge 每个边缘节点直接连接中心 PostgreSQL 和 Nacos：</p>
+
+<div class="arch-box">
+<pre>边缘节点 A（东京）     ──── 直连 ────► 中心 PG（北京）
+边缘节点 B（法兰克福） ──── 直连 ────► 中心 PG（北京）
+边缘节点 C（圣保罗）   ──── 直连 ────► 中心 Nacos（北京）
+...（N 个节点）</pre>
+</div>
+
+<p>存在以下问题：</p>
+<ul class="problem-list">
+  <li><strong>安全边界宽</strong>：PG/Nacos 凭证下发到所有边缘节点，一个节点被入侵即可横向访问数据库</li>
+  <li><strong>网络延迟高</strong>：跨洲直连 PG 做增量同步，TCP 延迟 100–300ms，同步窗口受限</li>
+  <li><strong>连接数压力</strong>：N 个边缘节点同时持有 PG 连接池，连接数随节点数线性增长</li>
+  <li><strong>Nacos 暴露面广</strong>：Nacos 管理端口暴露给全球节点，攻击面大</li>
+</ul>
+
+<hr>
+
+<h2>2. 方案：dns-control 中心控制服务</h2>
+
+<p>在中心部署一个轻量 HTTP 服务 <code>dns-control</code>，作为边缘节点唯一的数据入口。边缘节点不再直连 PG 或 Nacos。</p>
+
+<div class="arch-box">
+<pre>┌──────────────────────────────────────────────────────────┐
+│  中心（北京/主可用区）                                     │
+│                                                          │
+│  [dns-control]  ─── 内网直连 ───► PostgreSQL              │
+│       │         ─── 内网直连 ───► Nacos                   │
+│       │                                                  │
+│  [dns-control-standby]（热备，Active-Active）             │
+└──────────────────┬───────────────────────────────────────┘
+                   │ HTTPS（公网或专线）
+        ┌──────────┴──────────┐
+        ▼                     ▼
+  边缘节点 A（东京）      边缘节点 B（法兰克福）
+  [dns-edge]              [dns-edge]
+  只知道 dns-control      只知道 dns-control
+  的地址和 API Token      的地址和 API Token</pre>
+</div>
+
+<div class="section-note">
+  <strong>核心原则：</strong>dns-control 只管<strong>读和推</strong>，写路径（GoEdge AddRecord / 内部 REST API）仍由 dns-edge 直接写 PG，保持写路径简单。
+</div>
+
+<hr>
+
+<h2>3. dns-control 接口设计</h2>
+
+<h3>3.1 鉴权</h3>
+<p>所有接口使用 Bearer Token，token 在 Corefile 中配置，定期轮换。</p>
+<pre>Authorization: Bearer &lt;token&gt;</pre>
+
+<h3>3.2 接口列表</h3>
+<table>
+  <thead><tr><th>方法</th><th>路径</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td><span class="badge badge-get">GET</span></td><td><code>/v1/sync/incremental</code></td><td>增量拉取变更记录</td></tr>
+    <tr><td><span class="badge badge-get">GET</span></td><td><code>/v1/sync/full</code></td><td>全量拉取（节点首次启动时）</td></tr>
+    <tr><td><span class="badge badge-get">GET</span></td><td><code>/v1/weights/stream</code></td><td>SSE 长连接，推送权重变更</td></tr>
+    <tr><td><span class="badge badge-get">GET</span></td><td><code>/v1/weights/{domain}</code></td><td>查询指定域名当前权重（短连接降级）</td></tr>
+    <tr><td><span class="badge badge-get">GET</span></td><td><code>/healthz</code></td><td>健康检查</td></tr>
+  </tbody>
+</table>
+
+<h3>3.3 增量同步接口</h3>
+<p><strong>请求</strong></p>
+<pre>GET /v1/sync/incremental?since=&lt;unix_ms&gt;</pre>
+<p><strong>响应</strong></p>
+<pre>{
+  "until": 1719302400000,
+  "zones": [
+    { "id": 1, "name": "example.com.", "deleted": false }
+  ],
+  "records": [
+    { "id": 42, "zone_id": 1, "name": "www.example.com.", "type": "A",
+      "ttl": 300, "value": "1.2.3.4", "weight": 10, "deleted": false }
+  ]
+}</pre>
+<p><code>deleted: true</code> 表示软删除，边缘节点收到后从 ZoneStore 移除对应记录。<code>until</code> 作为下次请求的 <code>since</code> 参数。</p>
+
+<h3>3.4 权重推送接口（SSE）</h3>
+<pre>GET /v1/weights/stream</pre>
+<p>服务端以 Server-Sent Events 格式推送，每条事件格式：</p>
+<pre>event: weight_update
+data: {"domain":"www.example.com.","qtype":1,"weights":{"1.2.3.4":30,"5.6.7.8":70}}
+
+event: ping
+data: {}</pre>
+<p>边缘节点断线后自动重连，重连时先调一次 <code>/v1/weights/{domain}</code> 补齐丢失的推送。</p>
+
+<hr>
+
+<h2>4. dns-edge 侧改动</h2>
+
+<h3>4.1 配置变化</h3>
+<p>移除 <code>postgres</code> 和 <code>nacos</code> 块，新增 <code>control</code> 块：</p>
+<pre>dns-edge {
+    listen  :15300
+    api {
+        listen        :28082
+        goedge_secret &lt;secret&gt;
+    }
+    control {
+        url    https://dns-control.internal
+        token  &lt;bearer-token&gt;
+    }
+    sync {
+        interval  30s
+        prob      0.01
+        ratelimit 100
+    }
+}</pre>
+
+<h3>4.2 模块改动</h3>
+<table>
+  <thead><tr><th>模块</th><th>现在</th><th>改后</th></tr></thead>
+  <tbody>
+    <tr><td><code>internal/pg/</code></td><td>直连 PG，读写记录</td><td><strong>保留</strong>（dns-control 侧使用，dns-edge 写路径仍用）</td></tr>
+    <tr><td><code>internal/weight/nacos.go</code></td><td>直连 Nacos</td><td>替换为 SSE 客户端</td></tr>
+    <tr><td><code>internal/syncer/</code></td><td>调 <code>pg.Store.IncrementalLoad</code></td><td>改调 <code>control.Client.IncrementalLoad</code></td></tr>
+    <tr><td><strong>新增</strong> <code>internal/control/</code></td><td>—</td><td>HTTP 客户端，封装增量同步 + SSE 订阅两个接口</td></tr>
+  </tbody>
+</table>
+<p>dns-edge 自身不再需要 Nacos SDK，二进制体积缩小；PG 驱动仍保留用于写路径。</p>
+
+<hr>
+
+<h2>5. dns-control 服务实现</h2>
+
+<p>独立 Go 服务，目录结构：</p>
+<pre>cmd/dns-control/
+internal/
+  controlapi/   HTTP handlers（sync + weights + healthz）
+  pg/           复用 dns-edge 的 pg 包
+  nacos/        复用 dns-edge 的 weight/nacos.go</pre>
+
+<p>关键实现要点：</p>
+<ul>
+  <li><strong>SSE 连接管理</strong>：维护一个 <code>sync.Map[connID → chan Event]</code>，Nacos 推送回调时 fan-out 给所有在线连接</li>
+  <li><strong>增量查询</strong>：直接复用现有 <code>pg.Store.IncrementalLoad</code> 逻辑，将结果序列化为 JSON 返回</li>
+  <li><strong>高可用</strong>：两实例 Active-Active，前置 LB（Nginx/HAProxy）。无状态，SSE 断线重连天然幂等</li>
+</ul>
+
+<hr>
+
+<h2>6. 开发阶段规划</h2>
+<table>
+  <thead><tr><th>阶段</th><th>内容</th><th>预估</th></tr></thead>
+  <tbody>
+    <tr><td>P1</td><td><code>cmd/dns-control/</code> 骨架 + <code>/v1/sync/incremental</code> 接口</td><td>1 天</td></tr>
+    <tr><td>P2</td><td>SSE 权重推送 + Nacos 回调 fan-out</td><td>1 天</td></tr>
+    <tr><td>P3</td><td><code>internal/control/</code> 客户端（dns-edge 侧替换 Nacos 直连）</td><td>1.5 天</td></tr>
+    <tr><td>P4</td><td>配置层改造（移除 <code>nacos</code> 块，新增 <code>control</code> 块）</td><td>0.5 天</td></tr>
+    <tr><td>P5</td><td>单元测试 + 集成测试</td><td>1 天</td></tr>
+    <tr><td>P6</td><td>部署文档（docker-compose / K8s）</td><td>0.5 天</td></tr>
+  </tbody>
+</table>
+<p>总计约 <strong>5.5 天</strong>。</p>
+
+<hr>
+
+<h2>7. 待确认事项</h2>
+<ul class="todo-list">
+  <li>dns-control 部署位置：单独一个中心机房，还是与 PG 同机？</li>
+  <li>鉴权方式：Bearer Token 是否足够，还是需要 mTLS？</li>
+  <li>dns-edge 写路径：GoEdge 调 AddRecord 触发的写，是走 dns-control 代理，还是 dns-edge 直接写 PG？（推荐后者，dns-control 只管读/推）</li>
+  <li>全量同步触发时机：节点首次启动时调 /v1/sync/full，之后纯增量。是否需要定期全量兜底？</li>
+</ul>
+
+</body>
+</html>

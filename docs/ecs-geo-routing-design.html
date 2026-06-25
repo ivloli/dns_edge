@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ECS 地理路由方案（ip2region + 字典树）</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; line-height: 1.7; color: #172B4D; margin: 0; padding: 32px 48px; max-width: 960px; }
+  h1 { font-size: 24px; font-weight: 700; color: #0052CC; border-bottom: 2px solid #0052CC; padding-bottom: 10px; margin-top: 0; }
+  h2 { font-size: 18px; font-weight: 700; color: #0052CC; border-left: 4px solid #0052CC; padding-left: 10px; margin-top: 36px; }
+  h3 { font-size: 15px; font-weight: 700; color: #172B4D; margin-top: 24px; }
+  .meta { color: #6B778C; font-size: 13px; margin-bottom: 28px; }
+  .meta span { margin-right: 24px; }
+  pre { background: #F4F5F7; border: 1px solid #DFE1E6; border-radius: 4px; padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.6; }
+  code { background: #F4F5F7; border: 1px solid #DFE1E6; border-radius: 3px; padding: 1px 5px; font-size: 12.5px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; }
+  pre code { background: none; border: none; padding: 0; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 13px; }
+  th { background: #0052CC; color: #fff; padding: 9px 14px; text-align: left; font-weight: 600; }
+  td { padding: 8px 14px; border-bottom: 1px solid #DFE1E6; }
+  tr:nth-child(even) td { background: #F4F5F7; }
+  strong { color: #172B4D; }
+  .section-note { background: #DEEBFF; border: 1px solid #B3D4FF; border-radius: 4px; padding: 12px 16px; margin: 12px 0; font-size: 13px; }
+  .warn-note { background: #FFFAE6; border: 1px solid #FFE380; border-radius: 4px; padding: 12px 16px; margin: 12px 0; font-size: 13px; }
+  hr { border: none; border-top: 1px solid #DFE1E6; margin: 32px 0; }
+  .arch-box { background: #F4F5F7; border: 1px solid #DFE1E6; border-radius: 6px; padding: 20px 24px; margin: 16px 0; }
+  .arch-box pre { background: none; border: none; padding: 0; margin: 0; }
+  .tree { font-family: "SFMono-Regular", Consolas, Menlo, monospace; font-size: 13px; line-height: 2; }
+  .tree .key { color: #0052CC; font-weight: 600; }
+  .tree .note { color: #6B778C; font-style: italic; }
+  .fallback-chain { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+  .fallback-node { background: #0052CC; color: #fff; padding: 5px 14px; border-radius: 16px; font-size: 13px; font-weight: 600; }
+  .fallback-arrow { color: #6B778C; font-size: 18px; }
+  .fallback-node.default { background: #36B37E; }
+  .todo-list { list-style: none; padding: 0; }
+  .todo-list li { padding: 5px 0; border-bottom: 1px solid #F4F5F7; }
+  .todo-list li::before { content: "□ "; color: #6B778C; }
+  .mode-table td:first-child { font-weight: 600; }
+  .tag { display: inline-block; background: #EAE6FF; color: #403294; padding: 1px 7px; border-radius: 3px; font-size: 12px; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>ECS 地理路由方案（ip2region + 字典树）</h1>
+<div class="meta">
+  <span>版本：v1.0</span>
+  <span>日期：2026-06-25</span>
+  <span>状态：设计评审中</span>
+</div>
+
+<h2>1. 背景与目标</h2>
+
+<p>当前 dns-edge 的分流逻辑是按权重随机选 IP，无地理感知。客户端不管在哪，都可能被解析到延迟高的节点。</p>
+
+<p>目标：利用 DNS <strong>EDNS Client Subnet（ECS，RFC 7871）</strong> 携带的客户端子网，结合 ip2region xdb 数据库，按照<strong>运营商 + 地域</strong>维度返回最合适的记录。</p>
+
+<hr>
+
+<h2>2. ECS 数据流</h2>
+
+<div class="arch-box">
+<pre>客户端（上海电信）
+  │  dig @dns-edge.example.com www.foo.com +subnet=1.2.3.0/24
+  ▼
+dns-edge
+  │  从 EDNS0 OPT RR 中提取 client subnet（1.2.3.0/24）
+  │  取代表 IP（1.2.3.1）查 xdb → "中国|华东|上海|上海|电信"
+  │  在路由字典树中匹配 → 命中 "中国/电信/上海" → 返回对应 IP 组
+  ▼
+加权随机从命中 IP 组中选一条返回</pre>
+</div>
+
+<div class="section-note">
+  当请求<strong>不带 ECS</strong> 时，退化为现有的纯权重随机逻辑（<code>clientIP == nil</code>），行为完全不变。
+</div>
+
+<hr>
+
+<h2>3. ip2region xdb</h2>
+
+<table>
+  <thead><tr><th>属性</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>文件大小</td><td>约 11 MB</td></tr>
+    <tr><td>记录格式</td><td><code>国家|区域|省份|城市|ISP</code>（<code>|</code> 分隔，无数据用 <code>0</code> 占位）</td></tr>
+    <tr><td>查询示例</td><td><code>searcher.SearchByStr("1.2.3.1")</code> → <code>"中国|华东|上海|上海|电信"</code></td></tr>
+    <tr><td>推荐模式</td><td><strong>VectorIndex</strong>：约 1.5 MB 额外内存，查询延迟 &lt; 1 µs，无 I/O</td></tr>
+  </tbody>
+</table>
+
+<table class="mode-table">
+  <thead><tr><th>加载模式</th><th>内存</th><th>查询速度</th><th>适用场景</th></tr></thead>
+  <tbody>
+    <tr><td>File</td><td>最低</td><td>慢（有 I/O）</td><td>内存极限场景</td></tr>
+    <tr><td>VectorIndex ✓</td><td>+1.5 MB</td><td>&lt; 1 µs</td><td>生产推荐</td></tr>
+    <tr><td>MemorySearch</td><td>全量（~11 MB）</td><td>最快</td><td>超高 QPS 场景</td></tr>
+  </tbody>
+</table>
+
+<p>dns-edge 启动时加载一次 xdb 文件到 VectorIndex，后续查询无任何 I/O。</p>
+
+<hr>
+
+<h2>4. 路由字典树设计</h2>
+
+<h3>4.1 树结构</h3>
+
+<p>节点层级从粗到细，<strong>ISP 是最核心的分流维度</strong>，先按运营商分，再按地域细化：</p>
+
+<div class="arch-box">
+<div class="tree">
+root<br>
+&nbsp;└─ <span class="key">国家（Country）</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└─ <span class="key">ISP（运营商）</span> &nbsp;&nbsp;&nbsp;<span class="note">← 最核心：电信/联通/移动/海外</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└─ <span class="key">省份（Province）</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└─ <span class="key">城市（City）</span> &nbsp;&nbsp;&nbsp;<span class="note">← 可选，覆盖率参差不齐</span>
+</div>
+</div>
+
+<p>每个节点存储：</p>
+<ul>
+  <li><code>children map[string]*RouteNode</code></li>
+  <li><code>records []*iface.Record</code> — 命中该节点时返回的 IP 组（<code>nil</code> 表示当前层无配置，继续向上 fallback）</li>
+</ul>
+
+<h3>4.2 Fallback 规则</h3>
+
+<p>匹配从最细粒度开始，逐级向上退，直到找到有 records 的节点：</p>
+
+<div class="fallback-chain">
+  <div class="fallback-node">城市</div>
+  <div class="fallback-arrow">→</div>
+  <div class="fallback-node">省份</div>
+  <div class="fallback-arrow">→</div>
+  <div class="fallback-node">ISP</div>
+  <div class="fallback-arrow">→</div>
+  <div class="fallback-node">国家</div>
+  <div class="fallback-arrow">→</div>
+  <div class="fallback-node default">default</div>
+</div>
+
+<p><strong>示例</strong>：客户端是上海电信，字典树只配置到省份级别 →「中国/电信/上海/XX城市」未命中 → 退回「中国/电信/上海」→ 命中，返回上海电信 IP 组。</p>
+
+<h3>4.3 数据结构（Go）</h3>
+
+<pre>type RouteNode struct {
+    children map[string]*RouteNode
+    records  []*iface.Record // nil = no override at this level
+}
+
+type GeoRouter struct {
+    root     *RouteNode
+    searcher *ip2region.Searcher // xdb VectorIndex
+}
+
+// Query 返回 clientIP 对应的 IP 组；未命中任何节点时返回 nil（调用方用默认权重）
+func (g *GeoRouter) Query(fqdn string, qtype uint16, clientIP net.IP) []*iface.Record</pre>
+
+<h3>4.4 路由配置格式</h3>
+
+<p>在 PG 的 <code>routes</code> 表（新增）或记录的 <code>route_tags</code> JSON 字段中配置，格式建议：</p>
+
+<pre>country=中国;isp=电信;province=上海    ← 精确到省
+country=中国;isp=联通                  ← 精确到运营商
+country=中国                           ← 精确到国家
+default                                ← 全局兜底</pre>
+
+<p>GoEdge 调 <code>GetRoutes</code> 时，dns-edge 从字典树的所有叶节点反向生成 <code>{name, code}</code> 列表返回，GoEdge 管理员在控制台即可看到可选线路。</p>
+
+<hr>
+
+<h2>5. 查询路径（改造后）</h2>
+
+<div class="arch-box">
+<pre>ServeDNS()
+  │
+  ├─ 提取 ECS clientIP（已有，Phase 6 EDNS0 已实现）
+  │
+  ├─ if clientIP != nil &amp;&amp; GeoRouter != nil
+  │    └─ geoRouter.Query(name, qtype, clientIP)
+  │         ├─ xdb 查 IP → 解析 country / isp / province / city
+  │         ├─ 字典树从 city → province → isp → country 逐级匹配
+  │         └─ 找到 records → 加权随机返回
+  │
+  └─ else
+       └─ 现有 WeightProvider 逻辑（纯权重随机，行为不变）</pre>
+</div>
+
+<p>GeoRouter 作为独立的 <code>GeoWeightProvider</code>，在 <code>CompositeWeightProvider</code> 中优先级最高：</p>
+<pre>CompositeWeightProvider
+  ├─ GeoWeightProvider（有 ECS → 按地理匹配）
+  ├─ NacosWeightProvider（无 ECS → 按权重）
+  └─ StaticWeightProvider（Nacos 不可用时降级）</pre>
+
+<hr>
+
+<h2>6. 权重与地理路由的关系</h2>
+
+<p>两者<strong>不互斥</strong>，分层配合：</p>
+<ul>
+  <li><strong>地理路由</strong>：决定从哪个 IP <strong>池</strong>里选（例如「上海电信」对应 3 个 IP）</li>
+  <li><strong>权重</strong>：在选定的 IP 池内做加权随机（例如 3 个 IP 按 30:30:40 分配）</li>
+</ul>
+
+<p>Nacos 权重 DataID 按 route tag 分组，格式建议：</p>
+<pre>dns_weights:www.example.com.:A:country=中国;isp=电信</pre>
+<p>值：<code>{"1.2.3.4":30,"5.6.7.8":70}</code></p>
+
+<hr>
+
+<h2>7. xdb 文件部署</h2>
+
+<p>Dockerfile 中：</p>
+<pre>COPY ip2region.xdb /etc/dns-edge/</pre>
+
+<p>Corefile 新增 <code>geo</code> 块：</p>
+<pre>dns-edge {
+    geo {
+        xdb  /etc/dns-edge/ip2region.xdb
+    }
+}</pre>
+
+<div class="warn-note">
+  <code>geo</code> 块缺失或 <code>xdb</code> 路径不存在时，<strong>禁用地理路由，退化为纯权重</strong>，不影响现有功能。
+</div>
+
+<hr>
+
+<h2>8. 开发阶段规划</h2>
+<table>
+  <thead><tr><th>阶段</th><th>内容</th><th>预估</th></tr></thead>
+  <tbody>
+    <tr><td>P1</td><td><code>internal/geo/</code> 包：xdb 封装 + <code>GeoRouter</code> 字典树实现</td><td>1.5 天</td></tr>
+    <tr><td>P2</td><td>Corefile <code>geo { xdb ... }</code> 块解析 + 启动加载</td><td>0.5 天</td></tr>
+    <tr><td>P3</td><td><code>ServeDNS</code> 集成：ECS clientIP → GeoRouter → 加权随机</td><td>0.5 天</td></tr>
+    <tr><td>P4</td><td>PG <code>routes</code> 表 or 记录 <code>route_tags</code> 字段（存地理路由规则）</td><td>0.5 天</td></tr>
+    <tr><td>P5</td><td>单元测试（字典树 fallback 逻辑、ECS 集成）</td><td>1 天</td></tr>
+  </tbody>
+</table>
+<p>总计约 <strong>4 天</strong>。</p>
+
+<hr>
+
+<h2>9. 待确认事项</h2>
+<ul class="todo-list">
+  <li>路由规则存在哪：记录级别的 <code>route_tags</code> 字段（灵活但复杂），还是单独一张 <code>routes</code> 表（清晰但多一次查询）？</li>
+  <li>城市粒度：是否需要到城市级别？ip2region 城市数据覆盖率参差不齐，省份级别通常已够用。</li>
+  <li>xdb 版本更新：是否需要热更新机制（运行时替换 xdb），还是重启节点即可？</li>
+  <li>多国支持：目前设计以中国运营商为主，国际节点是否只需要按国家路由？</li>
+  <li>GoEdge GetRoutes 接口：地理路由启用后，GetRoutes 返回的线路列表需要包含所有配置的 route tag，需确认 GoEdge 如何展示和使用这些线路。</li>
+</ul>
+
+</body>
+</html>
