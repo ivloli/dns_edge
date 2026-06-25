@@ -177,67 +177,49 @@ dns-edge GoEdge Provider 处理层
 
 ---
 
-## 6. 新增模块规划
+## 6. 已实现模块
 
-只需新增一个文件，**不改动现有任何模块**：
+新增一个文件，**未改动现有任何模块**：
 
-### `internal/api/goedge_provider.go`
+### `internal/api/goedge_provider.go`（已完成）
 
-在现有 Gin 服务中新增一个路由：
-
-```
-POST /goedge/dns
-```
-
-处理逻辑：
-
-```go
-func (s *Server) goedgeProvider(c *gin.Context) {
-    // 1. 验证 Timestamp + Token
-    // 2. 解析 action
-    // 3. switch action { case "GetDomains": ... case "AddRecord": ... }
-    // 4. 调现有 s.pg / s.store 完成操作
-}
-```
-
-所有操作复用现有的 `pg.Store`（`CreateRecord`、`SoftDeleteRecord` 等）和 `ZoneStore`，无需新增依赖。
+在现有 Gin 服务中新增路由 `POST /goedge/dns`，处理所有 9 个 action。复用现有的 `pg.Store`（`CreateRecord`、`SoftDeleteRecord` 等）和 `ZoneStore`，无需新增依赖。
 
 ---
 
-## 7. 配置变化
+## 7. 配置
 
-**无需改动 Corefile**。GoEdge 那侧在 EdgeAdmin 后台配置 Provider 时填写：
-
-- `url`：`http://<dns-edge-addr>:<api-port>/goedge/dns`
-- `secret`：自定义共享密钥（在 dns-edge Corefile 的 `api` 块或环境变量中配置）
-
-Corefile 中可选新增一个 `secret` 配置项用于验签：
+Corefile `api` 块新增 `goedge_secret`（已完成）：
 
 ```
 api {
-    listen  :28082
-    goedge_secret  <your-shared-secret>
+    listen        :28082
+    goedge_secret <your-shared-secret>
 }
 ```
 
+GoEdge 那侧在 EdgeAdmin 后台配置 Provider 时填写：
+
+- `url`：`http://<dns-edge-addr>:<api-port>/goedge/dns`
+- `secret`：与 `goedge_secret` 相同的值
+
+`goedge_secret` 为空时跳过鉴权（开发/内网场景）。
+
 ---
 
-## 8. 开发阶段规划
+## 8. 开发进度
 
-| 阶段 | 内容 | 预估工作量 |
-|------|------|-----------|
-| P1 | `internal/api/goedge_provider.go`（单端点，全部 action 处理） | 1 天 |
-| P2 | 鉴权中间件（Timestamp + Token SHA1 校验） | 0.5 天 |
-| P3 | Corefile 新增 `goedge_secret` 配置项解析 | 0.5 天 |
-| P4 | 单元测试（mock GoEdge 调用，覆盖各 action） | 1 天 |
-| P5 | 与 GoEdge 联调测试 | 1 天 |
-
-总计约 **4 天**，远少于 v1.0 方案的 7.5 天。
+| 阶段 | 内容 | 状态 |
+|------|------|------|
+| P1 | `internal/api/goedge_provider.go`（单端点，全部 action） | ✅ 已完成 |
+| P2 | 鉴权（Timestamp + Token SHA1 校验） | ✅ 已完成 |
+| P3 | Corefile `goedge_secret` 配置项解析 | ✅ 已完成 |
+| P4 | 单元测试（mock GoEdge 调用，覆盖各 action） | ⬜ 待做 |
+| P5 | 与 GoEdge 联调测试 | ⬜ 待做 |
 
 ---
 
 ## 9. 待确认事项
 
-1. **goedge_secret 配置方式**：放 Corefile 还是环境变量？
-2. **权重（分流）**：GoEdge 调 `GetRoutes` 时，dns-edge 是否需要把 Nacos 里的权重线路暴露出去？还是只返回 `default` 一条线路，权重继续由 Nacos 内部管理？
-3. **GoEdge 管理的记录范围**：GoEdge 只写节点 A 记录和用户 CNAME 记录，业务 DNS 记录（用户自己加的）仍通过 dns-edge 内部 REST API 管理，两者共存，GoEdge 不会覆盖业务记录。需确认 GoEdge 管理员和业务记录是否会有命名冲突风险。
+1. **权重（分流）**：GoEdge 调 `GetRoutes` 时，dns-edge 是否需要把地理路由线路（`route_tags`）暴露出去？还是只返回 `default` 一条，权重继续由 Nacos 内部管理？
+2. **GoEdge 管理的记录范围**：GoEdge 只写节点 A 记录和用户 CNAME 记录，业务 DNS 记录仍通过 dns-edge 内部 REST API 管理。需确认两者是否有命名冲突风险。
