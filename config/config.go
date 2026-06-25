@@ -14,11 +14,25 @@ type Config struct {
 	PG    PGConfig
 	Nacos NacosConfig
 	Sync  SyncConfig
+	Geo   GeoConfig
+}
+
+// GeoConfig holds settings for ip2region-based geo-routing.
+type GeoConfig struct {
+	// XDBPath is the path to the ip2region .xdb database file.
+	// Empty = geo-routing disabled.
+	XDBPath string
 }
 
 type APIConfig struct {
 	Listen       string // HTTP API listen address, e.g. ":8080"
 	GoEdgeSecret string // shared secret for GoEdge customHTTP provider; empty = auth disabled
+
+	// EdgeDNS API (edgeDNSAPI provider) credentials.
+	// When both are set, GoEdge can use dns-edge as a native EdgeDNS node.
+	// Empty = edgeDNSAPI disabled.
+	EdgeDNSKeyID     string
+	EdgeDNSKeySecret string
 }
 
 type PGConfig struct {

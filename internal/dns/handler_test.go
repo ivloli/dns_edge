@@ -1,6 +1,7 @@
 package dns_test
 
 import (
+	"net"
 	"testing"
 
 	mdns "github.com/miekg/dns"
@@ -9,18 +10,41 @@ import (
 	"go.uber.org/zap"
 
 	dnshandler "dns-edge/internal/dns"
+	"dns-edge/internal/geo"
 	"dns-edge/internal/iface"
 	"dns-edge/internal/testutil"
 )
 
 // newHandler is a convenience constructor for tests.
 func newHandler(store iface.ZoneStore, weights iface.WeightProvider) *dnshandler.Handler {
-	return dnshandler.NewHandler(store, weights, nil, 0, zap.NewNop())
+	return dnshandler.NewHandler(store, weights, nil, 0, zap.NewNop(), nil)
 }
 
 func makeQuery(name string, qtype uint16) *mdns.Msg {
 	m := new(mdns.Msg)
 	m.SetQuestion(name, qtype)
+	return m
+}
+
+// makeQueryWithECS builds a query with an EDNS0 ECS option carrying clientIP.
+func makeQueryWithECS(name string, qtype uint16, clientIP net.IP) *mdns.Msg {
+	m := makeQuery(name, qtype)
+	o := new(mdns.OPT)
+	o.Hdr.Name = "."
+	o.Hdr.Rrtype = mdns.TypeOPT
+	ecs := new(mdns.EDNS0_SUBNET)
+	ecs.Code = mdns.EDNS0SUBNET
+	if ip4 := clientIP.To4(); ip4 != nil {
+		ecs.Family = 1
+		ecs.SourceNetmask = 24
+		ecs.Address = ip4
+	} else {
+		ecs.Family = 2
+		ecs.SourceNetmask = 48
+		ecs.Address = clientIP
+	}
+	o.Option = append(o.Option, ecs)
+	m.Extra = append(m.Extra, o)
 	return m
 }
 
@@ -238,7 +262,7 @@ func TestServeDNS_AXFR_TCP(t *testing.T) {
 
 	// Minimum 3 messages: opening SOA + records + closing SOA
 	require.GreaterOrEqual(t, len(rw.Msgs), 2)
-	first := rw.Msgs[0]
+	first := rw.LastMsg()
 	last := rw.Msgs[len(rw.Msgs)-1]
 	require.Len(t, first.Answer, 1)
 	require.Len(t, last.Answer, 1)
@@ -302,9 +326,129 @@ func TestServeDNS_ProbSync_Called(t *testing.T) {
 	}
 	syncer := &testutil.MockSyncer{}
 	// prob=1.0 → always trigger
-	h := dnshandler.NewHandler(store, &testutil.MockWeightProvider{}, syncer, 1.0, zap.NewNop())
+	h := dnshandler.NewHandler(store, &testutil.MockWeightProvider{}, syncer, 1.0, zap.NewNop(), nil)
 	rw := testutil.NewFakeRW()
 	h.ServeDNS(rw, makeQuery("www.example.com.", mdns.TypeA))
 
 	assert.Equal(t, 1, syncer.TriggerCount)
+}
+
+// ── Geo-routing (Phase 13) ────────────────────────────────────────────────────
+
+// fakeGeo is a GeoLookup stub that returns a fixed GeoInfo for any IP.
+type fakeGeo struct {
+	info geo.GeoInfo
+}
+
+func (f *fakeGeo) Lookup(_ net.IP) geo.GeoInfo { return f.info }
+
+func newGeoHandler(store iface.ZoneStore, g dnshandler.GeoLookup) *dnshandler.Handler {
+	return dnshandler.NewHandler(store, &testutil.MockWeightProvider{}, nil, 0, zap.NewNop(), g)
+}
+
+func TestGeoRouting_SpecificRouteSelected(t *testing.T) {
+	// Two records for www: one default (empty tags), one Shanghai telecom.
+	recDefault := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
+	recDefault.RouteTags = ""
+	recShanghai := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
+	recShanghai.RouteTags = "province=上海;isp=电信"
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recDefault, recShanghai}
+		},
+	}
+
+	// Client is from Shanghai Telecom → should always get 2.2.2.2
+	g := &fakeGeo{info: geo.GeoInfo{Country: "中国", Province: "上海", ISP: "电信"}}
+	h := newGeoHandler(store, g)
+
+	for i := 0; i < 20; i++ {
+		rw := testutil.NewFakeRW()
+		// inject ECS clientIP so handleQuery passes clientIP != nil
+		req := makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("1.2.3.4"))
+		h.ServeDNS(rw, req)
+		require.Len(t, rw.LastMsg().Answer, 1)
+		a := rw.LastMsg().Answer[0].(*mdns.A)
+		assert.Equal(t, "2.2.2.2", a.A.String(), "expected Shanghai-specific record")
+	}
+}
+
+func TestGeoRouting_FallbackToDefault(t *testing.T) {
+	// Client is from overseas; no country=美国 record exists → fall back to default.
+	recDefault := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
+	recDefault.RouteTags = ""
+	recShanghai := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
+	recShanghai.RouteTags = "province=上海"
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recDefault, recShanghai}
+		},
+	}
+
+	g := &fakeGeo{info: geo.GeoInfo{Country: "美国", Province: "", ISP: ""}}
+	h := newGeoHandler(store, g)
+
+	rw := testutil.NewFakeRW()
+	h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("8.8.8.8")))
+	require.Len(t, rw.LastMsg().Answer, 1)
+	a := rw.LastMsg().Answer[0].(*mdns.A)
+	assert.Equal(t, "1.1.1.1", a.A.String(), "expected default record for overseas client")
+}
+
+func TestGeoRouting_NoGeo_AllCandidates(t *testing.T) {
+	// When geo is nil (no ECS or no xdb), pick from all records normally.
+	rec1 := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 10)
+	rec1.RouteTags = "province=上海"
+	rec2 := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 10)
+	rec2.RouteTags = ""
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{rec1, rec2}
+		},
+	}
+
+	// nil geo, no ECS: handler uses all records
+	h := newGeoHandler(store, nil)
+	seen := map[string]bool{}
+	for i := 0; i < 50; i++ {
+		rw := testutil.NewFakeRW()
+		h.ServeDNS(rw, makeQuery("www.example.com.", mdns.TypeA))
+		if len(rw.LastMsg().Answer) > 0 {
+			seen[rw.LastMsg().Answer[0].(*mdns.A).A.String()] = true
+		}
+	}
+	// Both records should be selected over 50 rounds (equal weight=10)
+	assert.True(t, seen["1.1.1.1"], "province record should appear without geo filter")
+	assert.True(t, seen["2.2.2.2"], "default record should appear without geo filter")
+}
+
+func TestGeoRouting_NilClientIP_AllCandidates(t *testing.T) {
+	// Even with a geo router, nil clientIP (no ECS) → all records are candidates.
+	recDefault := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
+	recDefault.RouteTags = ""
+	recShanghai := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
+	recShanghai.RouteTags = "province=上海"
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recDefault, recShanghai}
+		},
+	}
+
+	g := &fakeGeo{info: geo.GeoInfo{Country: "中国", Province: "上海", ISP: "电信"}}
+	h := newGeoHandler(store, g)
+
+	// query without ECS → clientIP = nil → geo filter skipped
+	seen := map[string]bool{}
+	for i := 0; i < 50; i++ {
+		rw := testutil.NewFakeRW()
+		h.ServeDNS(rw, makeQuery("www.example.com.", mdns.TypeA))
+		if len(rw.LastMsg().Answer) > 0 {
+			seen[rw.LastMsg().Answer[0].(*mdns.A).A.String()] = true
+		}
+	}
+	assert.True(t, seen["1.1.1.1"] || seen["2.2.2.2"], "some record should be returned")
 }

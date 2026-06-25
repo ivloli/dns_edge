@@ -175,16 +175,16 @@
 - dns-control 写路径（GoEdge AddRecord 是走 dns-control 代理还是 dns-edge 直接写 PG？）
 - 鉴权方式（Bearer Token 还是 mTLS？）
 
-### 阶段 13：ECS 地理路由（待开始）
+### 阶段 13：ECS 地理路由（✅ 已完成）
 > 方案文档：docs/ecs-geo-routing-design.md
-- [ ] P1：`internal/geo/` 包（xdb 封装 + 字典树 GeoRouter）
-- [ ] P2：Corefile `geo { xdb ... }` 块解析 + 启动加载
-- [ ] P3：ServeDNS 集成（ECS clientIP → GeoRouter → 加权随机）
-- [ ] P4：PG 路由规则存储（route_tags 字段或独立 routes 表）
-- [ ] P5：单元测试
+- [x] P1：`internal/geo/` 包（ip2region xdb 全量内存加载，GeoInfo 解析，RouteTags Match）
+- [x] P2：Corefile `geo { xdb ... }` 块解析 + 启动加载（config.GeoConfig + parser.parseGeo）
+- [x] P3：ServeDNS 集成（ECS clientIP → filterByGeo → 加权随机；nil clientIP 跳过 geo）
+- [x] P4：路由规则存储：使用已有 `route_tags` 字段（格式 `province=上海;isp=电信`），无需新表
+- [x] P5：单元测试（geo_test.go 11 用例 + handler_test.go geo 4 用例）
 
-待确认：
-- 路由规则存储方案（route_tags 字段 vs 独立 routes 表）
-- 是否需要城市粒度（ip2region 城市数据覆盖率参差不齐）
-- xdb 热更新还是重启节点即可
+已确认：
+- 路由规则：复用 `route_tags` 字段，`:`→`=` 转换由 edgeDNSAPI 层负责
+- 城市粒度：暂不支持，只用省份/ISP/国家三维度
+- xdb 热更新：暂不支持，重启节点即可（可后续加 SIGHUP reload）
 

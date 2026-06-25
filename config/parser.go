@@ -243,6 +243,14 @@ func (p *parser) parseMain(cfg *Config) error {
 				return err
 			}
 
+		case "geo":
+			if err := p.expect("{"); err != nil {
+				return err
+			}
+			if err := p.parseGeo(&cfg.Geo); err != nil {
+				return err
+			}
+
 		default:
 			return fmt.Errorf("line %d: unknown key %q in dns-edge block", key.line, key.text)
 		}
@@ -273,6 +281,18 @@ func (p *parser) parseAPI(cfg *APIConfig) error {
 				return err
 			}
 			cfg.GoEdgeSecret = v
+		case "edgedns_access_key_id":
+			v, err := p.nextVal(key)
+			if err != nil {
+				return err
+			}
+			cfg.EdgeDNSKeyID = v
+		case "edgedns_access_key_secret":
+			v, err := p.nextVal(key)
+			if err != nil {
+				return err
+			}
+			cfg.EdgeDNSKeySecret = v
 		default:
 			return fmt.Errorf("line %d: unknown key %q in api block", key.line, key.text)
 		}
@@ -407,4 +427,28 @@ func (p *parser) parseSync(cfg *SyncConfig) error {
 
 func isTruthy(s string) bool {
 	return s == "true" || s == "1" || s == "yes"
+}
+
+func (p *parser) parseGeo(cfg *GeoConfig) error {
+	for {
+		t, ok := p.peek()
+		if !ok {
+			return fmt.Errorf("unexpected EOF inside geo block")
+		}
+		if t.text == "}" {
+			p.next()
+			return nil
+		}
+		key, _ := p.next()
+		switch key.text {
+		case "xdb":
+			v, err := p.nextVal(key)
+			if err != nil {
+				return err
+			}
+			cfg.XDBPath = v
+		default:
+			return fmt.Errorf("line %d: unknown key %q in geo block", key.line, key.text)
+		}
+	}
 }

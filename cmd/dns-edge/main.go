@@ -15,6 +15,7 @@ import (
 	"dns-edge/config"
 	"dns-edge/internal/api"
 	dnshandler "dns-edge/internal/dns"
+	"dns-edge/internal/geo"
 	"dns-edge/internal/iface"
 	"dns-edge/internal/pg"
 	"dns-edge/internal/store"
@@ -98,7 +99,20 @@ func main() {
 		syncerIface = pgSyncer
 	}
 
-	handler := dnshandler.NewHandler(zoneStore, weightProvider, syncerIface, cfg.Sync.Prob, log)
+	// geo-routing (Phase 13): load xdb if configured
+	var geoRouter *geo.Router
+	if cfg.Geo.XDBPath != "" {
+		var geoErr error
+		geoRouter, geoErr = geo.New(cfg.Geo.XDBPath)
+		if geoErr != nil {
+			log.Warn("geo-routing disabled: failed to load xdb", zap.String("path", cfg.Geo.XDBPath), zap.Error(geoErr))
+		} else {
+			log.Info("geo-routing enabled", zap.String("xdb", cfg.Geo.XDBPath))
+			defer geoRouter.Close()
+		}
+	}
+
+	handler := dnshandler.NewHandler(zoneStore, weightProvider, syncerIface, cfg.Sync.Prob, log, geoRouter)
 
 	mux := mdns.NewServeMux()
 	mux.Handle(".", handler)

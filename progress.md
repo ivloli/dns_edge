@@ -488,3 +488,38 @@
 - 可选：Helm Chart 完整实现
 - 可选：dig / kdig 集成测试脚本自动化
 - 未来（按需）：ECS 地理路由 — 实现 GeoWeightProvider，消费 clientIP 做 subnet→region→IP 映射
+
+---
+
+## Session 17 — P13 ECS 地理路由 + P14 edgeDNSAPI + P15 edgeapi NS 服务端（2026-06-25）
+
+### P14 edgeDNSAPI 服务端（dns-edge，已完成）
+- `internal/api/edgedns_auth.go`：AccessKey → Bearer Token（24h TTL，crypto/rand 32 字节 hex）
+- `internal/api/edgedns_provider.go`：14 个 NS*Service 端点，静态世界区域/省份/ISP 路由表
+- `config/config.go + parser.go`：新增 `edgedns_access_key_id / edgedns_access_key_secret`
+- `internal/api/server.go`：注册 edgeDNS 路由
+- `internal/api/edgedns_test.go`：22 个单元测试，全部通过
+
+### P15 edgeapi NS 商业版服务端（已完成）
+- `ns_domain_dao.go`：补全 CreateNSDomain / FindNSDomainWithName / ListNSDomains
+- `ns_record_dao.go`：去掉 !plus tag，补全 Create/Update/Delete/List/Find CRUD
+- `ns_route_dao.go`：去掉 !plus tag，补全 FindAllDefault*Routes
+- `service_ns_domain/record/route.go`：新建三个 REST service
+- `rest_server.go`：注册 NSDomain/NSRecord/NSRoute Service
+- `api_node_services_hook.go`：去掉 !plus tag
+- 顺带修复 EdgeCommon import 路径（243 文件，gitlab → github），删除 replace 指令
+- `go build ./...` 全部通过
+
+### P13 ECS 地理路由（dns-edge，已完成）
+- `internal/geo/geo.go`：ip2region xdb 全量内存加载；GeoInfo{Country/Province/ISP}；Match(routeTags) 逻辑
+- `internal/geo/geo_test.go`：11 个单元测试
+- `config/config.go + parser.go`：新增 GeoConfig{XDBPath}，`geo { xdb ... }` 块解析
+- `internal/dns/handler.go`：新增 GeoLookup 接口；filterByGeo（specific → default fallback → all）；NewHandler 加 geoRouter 参数
+- `cmd/dns-edge/main.go`：启动时加载 xdb，失败时 warn 并禁用 geo
+- `handler_test.go`：新增 4 个 geo-routing 集成测试 + makeQueryWithECS helper
+- `go test ./internal/dns/... ./internal/geo/...` 全部通过（19 + 11 用例）
+
+### 关键架构说明（澄清）
+- edgeDNSAPI 线路接口（配置面）：GoEdge 管理员配置记录时选择 province/ISP/country 线路 → 写入 record.RouteTags
+- P13 geo 路由（数据面）：DNS 查询时 ECS clientIP → ip2region → GeoInfo → 匹配 RouteTags → 选最精确记录
+- 两者互补，不重复

@@ -18,6 +18,7 @@ type Server struct {
 	store        iface.ZoneStore
 	log          *zap.Logger
 	goedgeSecret string
+	edgeDNSAuth  *edgeDNSAuth
 	httpSrv      *http.Server
 }
 
@@ -32,6 +33,7 @@ func New(cfg config.APIConfig, pg iface.RecordStore, zs iface.ZoneStore, log *za
 		store:        zs,
 		log:          log,
 		goedgeSecret: cfg.GoEdgeSecret,
+		edgeDNSAuth:  newEdgeDNSAuth(cfg.EdgeDNSKeyID, cfg.EdgeDNSKeySecret),
 		httpSrv: &http.Server{
 			Addr:    cfg.Listen,
 			Handler: r,
@@ -58,6 +60,9 @@ func New(cfg config.APIConfig, pg iface.RecordStore, zs iface.ZoneStore, log *za
 
 	// GoEdge customHTTP DNS provider endpoint.
 	r.POST("/goedge/dns", s.goedgeProvider)
+
+	// GoEdge edgeDNSAPI provider endpoints (14 endpoints across NS*Service).
+	s.registerEdgeDNSRoutes(r)
 
 	return s
 }

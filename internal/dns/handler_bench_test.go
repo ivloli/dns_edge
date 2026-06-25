@@ -19,7 +19,7 @@ import (
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func benchHandler(store iface.ZoneStore) *dnshandler.Handler {
-	return dnshandler.NewHandler(store, &testutil.MockWeightProvider{}, nil, 0, zap.NewNop())
+	return dnshandler.NewHandler(store, &testutil.MockWeightProvider{}, nil, 0, zap.NewNop(), nil)
 }
 
 func newQuery(name string, qtype uint16) *mdns.Msg {

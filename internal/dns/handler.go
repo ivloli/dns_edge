@@ -11,27 +11,37 @@ import (
 	mdns "github.com/miekg/dns"
 	"go.uber.org/zap"
 
+	"dns-edge/internal/geo"
 	"dns-edge/internal/iface"
 	"dns-edge/internal/metrics"
 )
 
 const axfrBatchSize = 500
 
+// GeoLookup is the interface the Handler uses for IP → geo lookups.
+// *geo.Router satisfies this interface.
+type GeoLookup interface {
+	Lookup(ip net.IP) geo.GeoInfo
+}
+
 // Handler answers authoritative DNS queries from ZoneStore.
 // Traffic splitting is driven by WeightProvider (Phase 5: Nacos;
 // Phase 1: Null — falls back to Record.Weight, then equal distribution).
+// Geo-routing (Phase 13) filters records by RouteTags before weight selection.
 type Handler struct {
 	store   iface.ZoneStore
 	weights iface.WeightProvider
 	log     *zap.Logger
 	syncer  iface.Syncer
 	prob    float64
+	geo     GeoLookup // nil = geo-routing disabled
 }
 
 // NewHandler constructs a Handler. Both store and weights must be non-nil.
 // syncer may be nil (disables probabilistic sync trigger).
-func NewHandler(store iface.ZoneStore, weights iface.WeightProvider, syncer iface.Syncer, prob float64, log *zap.Logger) *Handler {
-	return &Handler{store: store, weights: weights, syncer: syncer, prob: prob, log: log}
+// geoRouter may be nil (disables geo-routing; all records are candidates).
+func NewHandler(store iface.ZoneStore, weights iface.WeightProvider, syncer iface.Syncer, prob float64, log *zap.Logger, geoRouter GeoLookup) *Handler {
+	return &Handler{store: store, weights: weights, syncer: syncer, prob: prob, log: log, geo: geoRouter}
 }
 
 // ServeDNS implements mdns.Handler. Called by the miekg/dns server on every query.
@@ -287,21 +297,27 @@ func (h *Handler) serveAXFR(w mdns.ResponseWriter, r *mdns.Msg, name string) {
 
 // pick selects one record using weighted-random selection.
 //
-// Weight priority: WeightProvider (dynamic, e.g. Nacos) > Record.Weight (static)
-// > equal distribution (weight treated as 1 when zero).
+// Geo-routing (Phase 13): when a GeoRouter is configured and clientIP is
+// non-nil, records whose RouteTags match the client's geo take priority.
+// The candidate set is built as follows:
+//  1. Records whose RouteTags match the client's geo (specific routes).
+//  2. If no specific-route candidates exist, fall back to records with empty
+//     RouteTags (default routes).
+//  3. If neither exists, use all records.
 //
-// clientIP is the ECS client address passed through from the query. Current
-// WeightProvider implementations ignore it; future geo-routing will use it.
+// Weight priority: WeightProvider (dynamic) > Record.Weight (static) > 1.
 func (h *Handler) pick(records []*iface.Record, fqdn string, qtype uint16, clientIP net.IP) *iface.Record {
 	if len(records) == 1 {
 		return records[0]
 	}
 
+	candidates := h.filterByGeo(records, clientIP)
+
 	dynWeights := h.weights.GetWeights(fqdn, qtype, clientIP)
 
 	total := 0
-	ws := make([]int, len(records))
-	for i, r := range records {
+	ws := make([]int, len(candidates))
+	for i, r := range candidates {
 		w := r.Weight
 		if dynWeights != nil {
 			if dw, ok := dynWeights[r.Value]; ok {
@@ -319,8 +335,39 @@ func (h *Handler) pick(records []*iface.Record, fqdn string, qtype uint16, clien
 	for i, w := range ws {
 		n -= w
 		if n < 0 {
-			return records[i]
+			return candidates[i]
 		}
 	}
-	return records[len(records)-1]
+	return candidates[len(candidates)-1]
+}
+
+// filterByGeo narrows records to those matching the client's geo.
+// Falls back to default-route records, then to all records if needed.
+func (h *Handler) filterByGeo(records []*iface.Record, clientIP net.IP) []*iface.Record {
+	if h.geo == nil || clientIP == nil {
+		return records
+	}
+
+	info := h.geo.Lookup(clientIP)
+
+	// specific-route candidates: non-empty RouteTags that match
+	var specific []*iface.Record
+	// default-route candidates: empty RouteTags
+	var defaults []*iface.Record
+
+	for _, r := range records {
+		if r.RouteTags == "" {
+			defaults = append(defaults, r)
+		} else if info.Match(r.RouteTags) {
+			specific = append(specific, r)
+		}
+	}
+
+	if len(specific) > 0 {
+		return specific
+	}
+	if len(defaults) > 0 {
+		return defaults
+	}
+	return records
 }

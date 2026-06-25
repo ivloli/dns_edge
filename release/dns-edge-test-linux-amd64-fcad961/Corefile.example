@@ -1,0 +1,28 @@
+dns-edge {
+    listen   :5300
+    workers  0          # SO_REUSEPORT worker 数；0=禁用，-1=NumCPU，默认 0
+    tcp      true
+
+    api {
+        listen :8080
+    }
+
+    postgres {
+        dsn  postgres://user:pass@localhost:5432/dns-edge?sslmode=disable
+    }
+
+    nacos {
+        addr           localhost:8848
+        namespace      ""
+        username       nacos
+        password       nacos
+        group          dns_edge
+        data_id_prefix dns_weights:
+    }
+
+    sync {
+        interval  30s
+        prob      0.01
+        ratelimit 100
+    }
+}

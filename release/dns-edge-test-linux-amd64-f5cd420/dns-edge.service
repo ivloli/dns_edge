@@ -1,0 +1,20 @@
+[Unit]
+Description=dns-edge Authoritative DNS Server
+Documentation=https://github.com/yourusername/dns-edge
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/opt/dns-edge/bin/dns-edge -config /opt/dns-edge/etc/Corefile
+WorkingDirectory=/opt/dns-edge/data
+Restart=on-failure
+RestartSec=10s
+EnvironmentFile=-/opt/dns-edge/etc/env
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dns-edge
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
