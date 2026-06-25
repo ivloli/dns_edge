@@ -17,7 +17,8 @@ type Config struct {
 }
 
 type APIConfig struct {
-	Listen string // HTTP API listen address, e.g. ":8080"
+	Listen       string // HTTP API listen address, e.g. ":8080"
+	GoEdgeSecret string // shared secret for GoEdge customHTTP provider; empty = auth disabled
 }
 
 type PGConfig struct {

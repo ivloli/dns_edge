@@ -14,10 +14,11 @@ import (
 
 // Server wraps gin and http.Server for the hot-update HTTP API.
 type Server struct {
-	pg     iface.RecordStore
-	store  iface.ZoneStore
-	log    *zap.Logger
-	httpSrv *http.Server
+	pg           iface.RecordStore
+	store        iface.ZoneStore
+	log          *zap.Logger
+	goedgeSecret string
+	httpSrv      *http.Server
 }
 
 // New creates a Server and registers all routes. Call Start to begin serving.
@@ -27,9 +28,10 @@ func New(cfg config.APIConfig, pg iface.RecordStore, zs iface.ZoneStore, log *za
 	r.Use(gin.Recovery())
 
 	s := &Server{
-		pg:    pg,
-		store: zs,
-		log:   log,
+		pg:           pg,
+		store:        zs,
+		log:          log,
+		goedgeSecret: cfg.GoEdgeSecret,
 		httpSrv: &http.Server{
 			Addr:    cfg.Listen,
 			Handler: r,
@@ -53,6 +55,9 @@ func New(cfg config.APIConfig, pg iface.RecordStore, zs iface.ZoneStore, log *za
 
 	// Health endpoints — used as liveness/readiness probes.
 	r.GET("/healthz", s.healthz)
+
+	// GoEdge customHTTP DNS provider endpoint.
+	r.POST("/goedge/dns", s.goedgeProvider)
 
 	return s
 }

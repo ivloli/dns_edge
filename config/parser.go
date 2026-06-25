@@ -267,6 +267,12 @@ func (p *parser) parseAPI(cfg *APIConfig) error {
 				return err
 			}
 			cfg.Listen = v
+		case "goedge_secret":
+			v, err := p.nextVal(key)
+			if err != nil {
+				return err
+			}
+			cfg.GoEdgeSecret = v
 		default:
 			return fmt.Errorf("line %d: unknown key %q in api block", key.line, key.text)
 		}

@@ -148,13 +148,16 @@
 | 2026-06-21 | SO_REUSEPORT 默认禁用（workers=0） | 避免过早优化，接口设计保留开启路径 |
 | 2026-06-21 | 分流权重从 Redis 改为 Nacos | 已有 Nacos 基础设施；ListenConfig Push 比 Redis 定时拉取延迟更低；少维护一个组件 |
 | 2026-06-21 | 定性为 miekg/dns 项目而非 CoreDNS 项目 | CoreDNS 的 plugin chain / coremain 不适合权威 DNS 场景；仅借鉴 Corefile 风格和结构 |
-| 2026-06-24 | 移除 PG/Nacos 直连，改为通过 GoEdge EdgeAPI 获取数据 | 需部署在全球边缘节点，无法直连中心 DB；同时作为 GoEdge DNS Provider 对接 |
+| 2026-06-24 | 移除 PG/Nacos 直连，改为通过 GoEdge EdgeAPI 获取数据（已更正，见下方 2026-06-25 决策） | 最初误解 GoEdge 架构 |
 
-### 阶段 11：GoEdge Provider 改造（当前，feature/goedge-provider 分支）
-- [ ] P1：`internal/edgeapi/` 客户端（Token + Zone + Record CRUD）
-- [ ] P2：配置层改造（新增 `edgeapi` 块，移除 `postgres`/`nacos`）
-- [ ] P3：EdgeAPI Syncer（全量同步，替换 PG Syncer）
-- [ ] P4：GoEdge Provider HTTP API（`/NSDomainService/...` 等 14 个接口）
-- [ ] P5：鉴权中间件（AccessKeyId/Secret 校验，Token 颁发）
-- [ ] P6：集成测试 + 与 GoEdge 联调
-- [x] 技术文档：docs/goedge-provider-design.md + .html
+| 2026-06-25 | customHTTP 单端点替代 edgeDNSAPI 14 个端点 | 功能等价，实现更简单（1 个文件、简单签名鉴权） |
+| 2026-06-25 | PG + Nacos 保留不动 | GoEdge 只是写方，dns-edge 作为外部 DNS Provider 被调用，全球同步机制不变 |
+
+### 阶段 11：GoEdge Provider 改造（feature/goedge-provider 分支）✅ 完成
+- [x] 技术文档：docs/goedge-provider-design.md v2.0（customHTTP 方案，架构已更正）
+- [x] `config.APIConfig` 新增 `GoEdgeSecret` 字段
+- [x] `config/parser.go` 支持 `api { goedge_secret <val> }` 配置
+- [x] `internal/api/goedge_provider.go`（`POST /goedge/dns`，9 个 action）
+- [x] `internal/api/server.go` 注册路由 + 存 secret
+- [ ] GoEdge Provider 接口单元测试（mock GoEdge 请求，覆盖各 action + 鉴权）
+- [ ] 与 GoEdge 联调测试
