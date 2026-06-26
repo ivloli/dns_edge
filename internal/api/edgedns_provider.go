@@ -1,17 +1,16 @@
 package api
 
 import (
-	"context"
-	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 	mdns "github.com/miekg/dns"
 
 	"dns-edge/internal/iface"
-	"dns-edge/internal/pg"
 )
 
 // ── static route tables ───────────────────────────────────────────────────────
@@ -78,6 +77,26 @@ var (
 	}
 )
 
+// recordIDCounter generates in-process record IDs when there is no database.
+// Starts at 1; 0 is reserved as "unset".
+var recordIDCounter int64
+
+func nextRecordID() int64 {
+	return atomic.AddInt64(&recordIDCounter, 1)
+}
+
+// zoneID derives a stable int64 zone ID from the apex FQDN using FNV-1a.
+// This is deterministic and collision-resistant for reasonable zone counts.
+func zoneID(apex string) int64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(apex))
+	v := int64(h.Sum64())
+	if v < 0 {
+		return -v // keep positive
+	}
+	return v
+}
+
 // ── request/response types ────────────────────────────────────────────────────
 
 type getTokenReq struct {
@@ -87,13 +106,13 @@ type getTokenReq struct {
 }
 
 type nsRecordObj struct {
-	Id       int64      `json:"id"`
-	Name     string     `json:"name"`
-	Type     string     `json:"type"`
-	Value    string     `json:"value"`
-	TTL      uint32     `json:"ttl"`
-	IsOn     bool       `json:"isOn"`
-	NSRoutes []nsRoute  `json:"nsRoutes"`
+	Id       int64     `json:"id"`
+	Name     string    `json:"name"`
+	Type     string    `json:"type"`
+	Value    string    `json:"value"`
+	TTL      uint32    `json:"ttl"`
+	IsOn     bool      `json:"isOn"`
+	NSRoutes []nsRoute `json:"nsRoutes"`
 }
 
 type nsDomainObj struct {
@@ -167,10 +186,14 @@ func (s *Server) edgeDNSListDomains(c *gin.Context) {
 		req.Size = 100
 	}
 
-	zones, err := s.pg.ListZones(c.Request.Context())
-	if err != nil {
-		c.JSON(http.StatusOK, edgeDNSErrResp(500, err.Error()))
-		return
+	snap := s.store.Snapshot()
+	zones := make([]nsDomainObj, 0, len(snap))
+	for apex := range snap {
+		zones = append(zones, nsDomainObj{
+			Id:   zoneID(apex),
+			Name: strings.TrimSuffix(apex, "."),
+			IsOn: true,
+		})
 	}
 
 	// apply offset/size pagination
@@ -183,11 +206,7 @@ func (s *Server) edgeDNSListDomains(c *gin.Context) {
 		}
 	}
 
-	domains := make([]nsDomainObj, len(zones))
-	for i, z := range zones {
-		domains[i] = nsDomainObj{Id: z.ID, Name: strings.TrimSuffix(z.Name, "."), IsOn: true}
-	}
-	c.JSON(http.StatusOK, edgeDNSOK(gin.H{"nsDomains": domains}))
+	c.JSON(http.StatusOK, edgeDNSOK(gin.H{"nsDomains": zones}))
 }
 
 func (s *Server) edgeDNSFindDomain(c *gin.Context) {
@@ -198,17 +217,23 @@ func (s *Server) edgeDNSFindDomain(c *gin.Context) {
 		c.JSON(http.StatusOK, edgeDNSErrResp(400, "name required"))
 		return
 	}
-	zone, err := s.pg.GetZone(c.Request.Context(), iface.FQDN(req.Name))
-	if err != nil {
-		if errors.Is(err, pg.ErrNotFound) {
-			c.JSON(http.StatusOK, edgeDNSOK(gin.H{"nsDomain": nil}))
+	apex := iface.FQDN(req.Name)
+	snap := s.store.Snapshot()
+	if _, ok := snap[apex]; !ok {
+		// Auto-create an empty zone so GoEdge can immediately create records.
+		// dns-edge has no persistent state; GoEdge is the source of truth.
+		if err := s.store.Update(&iface.Zone{
+			Name:    apex,
+			Records: make(map[iface.RecordKey][]*iface.Record),
+		}); err != nil {
+			c.JSON(http.StatusOK, edgeDNSErrResp(500, err.Error()))
 			return
 		}
-		c.JSON(http.StatusOK, edgeDNSErrResp(500, err.Error()))
-		return
 	}
 	c.JSON(http.StatusOK, edgeDNSOK(gin.H{"nsDomain": nsDomainObj{
-		Id: zone.ID, Name: strings.TrimSuffix(zone.Name, "."), IsOn: true,
+		Id:   zoneID(apex),
+		Name: strings.TrimSuffix(apex, "."),
+		IsOn: true,
 	}}))
 }
 
@@ -228,17 +253,13 @@ func (s *Server) edgeDNSListRecords(c *gin.Context) {
 		req.Size = 100
 	}
 
-	apex, err := s.resolveApex(c.Request.Context(), req.NSDomainID)
+	apex, err := s.resolveApexByID(req.NSDomainID)
 	if err != nil {
 		c.JSON(http.StatusOK, edgeDNSErrResp(404, err.Error()))
 		return
 	}
 
-	recs, err := s.pg.ListRecords(c.Request.Context(), apex)
-	if err != nil {
-		c.JSON(http.StatusOK, edgeDNSErrResp(500, err.Error()))
-		return
-	}
+	recs := s.listRecordsInZone(apex)
 
 	if req.Offset >= len(recs) {
 		recs = nil
@@ -249,7 +270,7 @@ func (s *Server) edgeDNSListRecords(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, edgeDNSOK(gin.H{"nsRecords": toNSRecordObjs(recs)}))
+	c.JSON(http.StatusOK, edgeDNSOK(gin.H{"nsRecords": toNSRecordObjs(recs, apex)}))
 }
 
 func (s *Server) edgeDNSFindRecord(c *gin.Context) {
@@ -262,7 +283,12 @@ func (s *Server) edgeDNSFindRecord(c *gin.Context) {
 		c.JSON(http.StatusOK, edgeDNSErrResp(400, err.Error()))
 		return
 	}
-	recs, err := s.edgeDNSQueryByNameType(c.Request.Context(), req.NSDomainID, req.Name, req.Type)
+	apex, err := s.resolveApexByID(req.NSDomainID)
+	if err != nil {
+		c.JSON(http.StatusOK, edgeDNSErrResp(404, err.Error()))
+		return
+	}
+	recs, err := s.queryByNameType(req.NSDomainID, req.Name, req.Type)
 	if err != nil {
 		c.JSON(http.StatusOK, edgeDNSErrResp(500, err.Error()))
 		return
@@ -271,7 +297,7 @@ func (s *Server) edgeDNSFindRecord(c *gin.Context) {
 		c.JSON(http.StatusOK, edgeDNSOK(gin.H{"nsRecord": nil}))
 		return
 	}
-	c.JSON(http.StatusOK, edgeDNSOK(gin.H{"nsRecord": toNSRecordObj(recs[0])}))
+	c.JSON(http.StatusOK, edgeDNSOK(gin.H{"nsRecord": toNSRecordObj(recs[0], apex)}))
 }
 
 func (s *Server) edgeDNSFindRecords(c *gin.Context) {
@@ -284,12 +310,17 @@ func (s *Server) edgeDNSFindRecords(c *gin.Context) {
 		c.JSON(http.StatusOK, edgeDNSErrResp(400, err.Error()))
 		return
 	}
-	recs, err := s.edgeDNSQueryByNameType(c.Request.Context(), req.NSDomainID, req.Name, req.Type)
+	apex, err := s.resolveApexByID(req.NSDomainID)
+	if err != nil {
+		c.JSON(http.StatusOK, edgeDNSErrResp(404, err.Error()))
+		return
+	}
+	recs, err := s.queryByNameType(req.NSDomainID, req.Name, req.Type)
 	if err != nil {
 		c.JSON(http.StatusOK, edgeDNSErrResp(500, err.Error()))
 		return
 	}
-	c.JSON(http.StatusOK, edgeDNSOK(gin.H{"nsRecords": toNSRecordObjs(recs)}))
+	c.JSON(http.StatusOK, edgeDNSOK(gin.H{"nsRecords": toNSRecordObjs(recs, apex)}))
 }
 
 func (s *Server) edgeDNSCreateRecord(c *gin.Context) {
@@ -306,25 +337,24 @@ func (s *Server) edgeDNSCreateRecord(c *gin.Context) {
 		return
 	}
 
-	apex, err := s.resolveApex(c.Request.Context(), req.NSDomainID)
+	apex, err := s.resolveApexByID(req.NSDomainID)
 	if err != nil {
 		c.JSON(http.StatusOK, edgeDNSErrResp(404, err.Error()))
 		return
 	}
 
-	rec, err := nsToRecord(req.Name, req.Type, req.Value, req.TTL, req.NSRouteCodes)
+	rec, err := nsToRecord(req.Name, apex, req.Type, req.Value, req.TTL, req.NSRouteCodes)
 	if err != nil {
 		c.JSON(http.StatusOK, edgeDNSErrResp(400, err.Error()))
 		return
 	}
+	rec.ID = nextRecordID()
 
-	created, _, err := s.pg.CreateRecord(c.Request.Context(), req.NSDomainID, rec)
-	if err != nil {
+	if err := s.store.PutRecord(apex, rec); err != nil {
 		c.JSON(http.StatusOK, edgeDNSErrResp(500, err.Error()))
 		return
 	}
-	_ = s.store.PutRecord(apex, created)
-	c.JSON(http.StatusOK, edgeDNSOK(gin.H{"nsRecordId": created.ID}))
+	c.JSON(http.StatusOK, edgeDNSOK(gin.H{"nsRecordId": rec.ID}))
 }
 
 func (s *Server) edgeDNSUpdateRecord(c *gin.Context) {
@@ -342,28 +372,23 @@ func (s *Server) edgeDNSUpdateRecord(c *gin.Context) {
 		return
 	}
 
-	rec, err := nsToRecord(req.Name, req.Type, req.Value, req.TTL, req.NSRouteCodes)
-	if err != nil {
-		c.JSON(http.StatusOK, edgeDNSErrResp(400, err.Error()))
-		return
-	}
-
-	// We need the zone ID; look it up by listing zones and finding the record.
-	// Simpler: reuse pg.UpdateRecord which takes (zoneID, recordID). We find
-	// the zone by doing a ListZones + matching record lookup. Since UpdateRecord
-	// only needs zoneID for scoping, we fetch it via a dedicated lookup.
-	zoneID, apex, err := s.findZoneForRecord(c.Request.Context(), req.NSRecordID)
+	apex, err := s.findApexForRecord(req.NSRecordID)
 	if err != nil {
 		c.JSON(http.StatusOK, edgeDNSErrResp(404, err.Error()))
 		return
 	}
 
-	updated, err := s.pg.UpdateRecord(c.Request.Context(), zoneID, req.NSRecordID, rec)
+	rec, err := nsToRecord(req.Name, apex, req.Type, req.Value, req.TTL, req.NSRouteCodes)
 	if err != nil {
+		c.JSON(http.StatusOK, edgeDNSErrResp(400, err.Error()))
+		return
+	}
+	rec.ID = req.NSRecordID
+
+	if err := s.store.PutRecord(apex, rec); err != nil {
 		c.JSON(http.StatusOK, edgeDNSErrResp(500, err.Error()))
 		return
 	}
-	_ = s.store.PutRecord(apex, updated)
 	c.JSON(http.StatusOK, edgeDNSOK(nil))
 }
 
@@ -376,17 +401,16 @@ func (s *Server) edgeDNSDeleteRecord(c *gin.Context) {
 		return
 	}
 
-	zoneID, apex, err := s.findZoneForRecord(c.Request.Context(), req.NSRecordID)
+	apex, err := s.findApexForRecord(req.NSRecordID)
 	if err != nil {
 		c.JSON(http.StatusOK, edgeDNSErrResp(404, err.Error()))
 		return
 	}
 
-	if err := s.pg.SoftDeleteRecord(c.Request.Context(), zoneID, req.NSRecordID); err != nil {
+	if err := s.store.DropRecord(apex, req.NSRecordID); err != nil {
 		c.JSON(http.StatusOK, edgeDNSErrResp(500, err.Error()))
 		return
 	}
-	_ = s.store.DropRecord(apex, req.NSRecordID)
 	c.JSON(http.StatusOK, edgeDNSOK(nil))
 }
 
@@ -414,47 +438,47 @@ func (s *Server) edgeDNSCustomRoutes(c *gin.Context) {
 
 // ── internal helpers ──────────────────────────────────────────────────────────
 
-// resolveApex looks up the zone apex FQDN by zone ID (via ListZones).
-func (s *Server) resolveApex(ctx context.Context, zoneID int64) (string, error) {
-	zones, err := s.pg.ListZones(ctx)
-	if err != nil {
-		return "", err
-	}
-	for _, z := range zones {
-		if z.ID == zoneID {
-			return z.Name, nil
+// resolveApexByID finds the zone apex whose zoneID() matches id.
+func (s *Server) resolveApexByID(id int64) (string, error) {
+	for apex := range s.store.Snapshot() {
+		if zoneID(apex) == id {
+			return apex, nil
 		}
 	}
-	return "", fmt.Errorf("zone %d not found", zoneID)
+	return "", fmt.Errorf("zone %d not found", id)
 }
 
-// findZoneForRecord returns (zoneID, apex) by scanning all zones for the record.
-func (s *Server) findZoneForRecord(ctx context.Context, recordID int64) (int64, string, error) {
-	zones, err := s.pg.ListZones(ctx)
-	if err != nil {
-		return 0, "", err
-	}
-	for _, z := range zones {
-		recs, err := s.pg.ListRecords(ctx, z.Name)
-		if err != nil {
-			continue
-		}
-		for _, r := range recs {
-			if r.ID == recordID {
-				return z.ID, z.Name, nil
+// findApexForRecord scans all zones to find the one containing recordID.
+func (s *Server) findApexForRecord(recordID int64) (string, error) {
+	for apex, zone := range s.store.Snapshot() {
+		for _, recs := range zone.Records {
+			for _, r := range recs {
+				if r.ID == recordID {
+					return apex, nil
+				}
 			}
 		}
 	}
-	return 0, "", fmt.Errorf("record %d not found", recordID)
+	return "", fmt.Errorf("record %d not found", recordID)
 }
 
-// edgeDNSQueryByNameType fetches records matching (domainID, name, type).
-func (s *Server) edgeDNSQueryByNameType(ctx context.Context, domainID int64, name, recType string) ([]*iface.Record, error) {
-	apex, err := s.resolveApex(ctx, domainID)
-	if err != nil {
-		return nil, err
+// listRecordsInZone returns all records in a zone as a flat slice.
+func (s *Server) listRecordsInZone(apex string) []*iface.Record {
+	snap := s.store.Snapshot()
+	zone, ok := snap[apex]
+	if !ok {
+		return nil
 	}
-	all, err := s.pg.ListRecords(ctx, apex)
+	var out []*iface.Record
+	for _, recs := range zone.Records {
+		out = append(out, recs...)
+	}
+	return out
+}
+
+// queryByNameType returns records in domainID's zone matching (name, type).
+func (s *Server) queryByNameType(domainID int64, name, recType string) ([]*iface.Record, error) {
+	apex, err := s.resolveApexByID(domainID)
 	if err != nil {
 		return nil, err
 	}
@@ -462,23 +486,26 @@ func (s *Server) edgeDNSQueryByNameType(ctx context.Context, domainID int64, nam
 	if !ok {
 		return nil, fmt.Errorf("unknown record type %q", recType)
 	}
-	fqdn := iface.FQDN(name)
-	var out []*iface.Record
-	for _, r := range all {
-		if r.Name == fqdn && r.Type == qtype {
-			out = append(out, r)
-		}
+	fqdn := qualifyName(name, apex)
+	recs := s.store.Lookup(fqdn, qtype)
+	// Verify the records belong to the requested zone (Lookup searches globally).
+	zone := s.store.FindZone(fqdn)
+	if zone == nil || zone.Name != apex {
+		return nil, nil
 	}
-	return out, nil
+	return recs, nil
 }
 
 // nsToRecord converts edgeDNSAPI fields to an iface.Record.
-func nsToRecord(name, recType, value string, ttl uint32, nsRouteCodes []string) (*iface.Record, error) {
+// apex is the zone FQDN (e.g. "example.com."); name may be a short label
+// ("www"), a relative name ("www.sub"), or already a FQDN ("www.example.com.").
+// If name does not already end with apex, apex is appended.
+func nsToRecord(name, apex, recType, value string, ttl uint32, nsRouteCodes []string) (*iface.Record, error) {
 	qtype, ok := mdns.StringToType[strings.ToUpper(recType)]
 	if !ok {
 		return nil, fmt.Errorf("unknown record type %q", recType)
 	}
-	fqdn := iface.FQDN(name)
+	fqdn := qualifyName(name, apex)
 	rrStr := fmt.Sprintf("%s %d IN %s %s", fqdn, ttl, strings.ToUpper(recType), value)
 	rr, err := mdns.NewRR(rrStr)
 	if err != nil {
@@ -494,16 +521,29 @@ func nsToRecord(name, recType, value string, ttl uint32, nsRouteCodes []string) 
 	}, nil
 }
 
+// qualifyName turns a short label or relative name into a FQDN under apex.
+// apex must already have a trailing dot.
+// Examples: qualifyName("www", "example.com.") → "www.example.com."
+//
+//	qualifyName("www.example.com.", "example.com.") → "www.example.com."
+//	qualifyName("example.com.", "example.com.")   → "example.com."
+func qualifyName(name, apex string) string {
+	// Already a FQDN that ends with apex — leave it.
+	if strings.HasSuffix(name, ".") {
+		return name
+	}
+	// Relative name: append ".<apex>" (apex already has trailing dot).
+	return name + "." + apex
+}
+
 // nsRouteCodesToTags converts GoEdge nsRouteCodes (["province:上海","isp:电信"])
 // to the internal route_tags format ("province=上海;isp=电信").
-// Empty/default codes produce an empty string.
 func nsRouteCodesToTags(codes []string) string {
 	var parts []string
 	for _, code := range codes {
 		if code == "" || code == "default" {
 			continue
 		}
-		// "province:上海" → "province=上海"
 		if idx := strings.IndexByte(code, ':'); idx > 0 {
 			parts = append(parts, code[:idx]+"="+code[idx+1:])
 		}
@@ -530,10 +570,21 @@ func routeTagsToNSRoutes(tags string) []nsRoute {
 	return routes
 }
 
-func toNSRecordObj(r *iface.Record) nsRecordObj {
+// toNSRecordObj converts a Record to the edgeDNSAPI wire format.
+// apex is the zone FQDN (e.g. "example.com."); the short relative name
+// (e.g. "www") is derived by stripping ".<apex>" from the FQDN.
+func toNSRecordObj(r *iface.Record, apex string) nsRecordObj {
+	shortName := r.Name
+	// Strip the ".<apex>" suffix to get back the label GoEdge sent.
+	if strings.HasSuffix(shortName, "."+apex) {
+		shortName = shortName[:len(shortName)-len("."+apex)]
+	} else {
+		// Fallback: just strip trailing dot.
+		shortName = strings.TrimSuffix(shortName, ".")
+	}
 	return nsRecordObj{
 		Id:       r.ID,
-		Name:     strings.TrimSuffix(r.Name, "."),
+		Name:     shortName,
 		Type:     mdns.TypeToString[r.Type],
 		Value:    r.Value,
 		TTL:      r.TTL,
@@ -542,10 +593,10 @@ func toNSRecordObj(r *iface.Record) nsRecordObj {
 	}
 }
 
-func toNSRecordObjs(recs []*iface.Record) []nsRecordObj {
+func toNSRecordObjs(recs []*iface.Record, apex string) []nsRecordObj {
 	out := make([]nsRecordObj, len(recs))
 	for i, r := range recs {
-		out[i] = toNSRecordObj(r)
+		out[i] = toNSRecordObj(r, apex)
 	}
 	return out
 }

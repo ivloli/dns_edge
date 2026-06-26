@@ -1,0 +1,22 @@
+# dns-edge 本机联调配置
+# edgeapi 作为 DNS Provider caller，通过 edgeDNSAPI 接口管理记录
+
+dns-edge {
+    listen  :5300
+    workers 0
+    tcp     true
+
+    api {
+        listen :8080
+
+        # edgeDNSAPI credentials — edgeapi 用这组 key 来认证
+        edgedns_access_key_id     local-dns-edge-01
+        edgedns_access_key_secret localSecret123456
+    }
+
+    sync {
+        interval  30s
+        prob      0.01
+        ratelimit 100
+    }
+}

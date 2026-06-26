@@ -82,7 +82,16 @@ func main() {
 
 		pgSyncer = syncer.New(pgStore, zoneStore, syncSince, cfg.Sync, log)
 
+		// Start API server with PG-backed record store.
 		apiSrv = api.New(cfg.API, pgStore, zoneStore, log)
+		if err := apiSrv.Start(); err != nil {
+			log.Fatal("api server start", zap.Error(err))
+		}
+	} else if cfg.API.Listen != "" {
+		// No PG — start API server with nil record store.
+		// /api/v1 endpoints (PG-backed CRUD) are unavailable, but
+		// edgeDNSAPI, goedge provider, /healthz, and /metrics all work.
+		apiSrv = api.New(cfg.API, nil, zoneStore, log)
 		if err := apiSrv.Start(); err != nil {
 			log.Fatal("api server start", zap.Error(err))
 		}

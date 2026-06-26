@@ -41,7 +41,7 @@ func New(cfg config.APIConfig, pg iface.RecordStore, zs iface.ZoneStore, log *za
 	}
 
 	v1 := r.Group("/api/v1")
-	{
+	if pg != nil {
 		v1.GET("/domains", s.listDomains)
 		v1.POST("/domains", s.createDomain)
 		v1.DELETE("/domains/:domain", s.deleteDomain)
@@ -50,6 +50,17 @@ func New(cfg config.APIConfig, pg iface.RecordStore, zs iface.ZoneStore, log *za
 		v1.POST("/domains/:domain/records", s.createRecord)
 		v1.PUT("/domains/:domain/records/:id", s.updateRecord)
 		v1.DELETE("/domains/:domain/records/:id", s.deleteRecord)
+	} else {
+		notImpl := func(c *gin.Context) {
+			c.JSON(http.StatusNotImplemented, gin.H{"error": "PG backend not configured"})
+		}
+		v1.GET("/domains", notImpl)
+		v1.POST("/domains", notImpl)
+		v1.DELETE("/domains/:domain", notImpl)
+		v1.GET("/domains/:domain/records", notImpl)
+		v1.POST("/domains/:domain/records", notImpl)
+		v1.PUT("/domains/:domain/records/:id", notImpl)
+		v1.DELETE("/domains/:domain/records/:id", notImpl)
 	}
 
 	// Prometheus metrics endpoint — consumed by Prometheus scraper.
