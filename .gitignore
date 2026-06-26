@@ -10,4 +10,4 @@ Corefile
 *.swp
 
 # 编译产物
-dns-edge
+/dns-edge
