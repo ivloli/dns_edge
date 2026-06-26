@@ -1,392 +1,314 @@
-# dns-edge 部署指南
+# 部署指南：GoEdge + dns-edge 完整联调环境
 
-本文档说明如何使用 Makefile 进行本地编译打包和目标机部署。
+本文档描述从零开始在新机器上部署 edgeapi + edgeadmin + dns-edge 的完整流程，
+包含编译、配置、启动和验证步骤。
 
----
+## 环境要求
 
-## 目录
-
-- [快速开始](#快速开始)
-- [本地编译打包](#本地编译打包)
-- [目标机部署](#目标机部署)
-- [服务管理](#服务管理)
-- [自定义安装路径](#自定义安装路径)
-- [卸载](#卸载)
+- OS：Linux x86_64（已在 Ubuntu 22.04 / Amazon Linux 2 验证）
+- Go 1.21+（编译用，运行时不需要）
+- MySQL 8.0+
+- git
 
 ---
 
-## 快速开始
+## 目录结构约定
 
-### 1. 本机打包
-
-```bash
-# 进入项目目录
-cd /path/to/dns_dev
-
-# 打包（使用默认配置文件 Corefile）
-make release-package
-
-# 打包测试环境（使用 Corefile.test，压缩包名称带 test 标识）
-make release-package CONFIG_SRC=Corefile.test RELEASE_INFIX=test
-
-# 打包生产环境
-make release-package CONFIG_SRC=Corefile.prod RELEASE_INFIX=prod
 ```
+/home/<user>/Git_repo/
+├── edgeapi/          # GoEdge API 节点
+├── edgeadmin/        # GoEdge 管理后台
+├── edgecommon/       # 公共库（edgeadmin 依赖）
+└── EdgeCommon -> edgecommon   # 软链接（edgeadmin go.mod 依赖）
 
-生成的压缩包格式：`dns-edge-<infix>-linux-amd64-<git-tag>.tar.gz`
-
-### 2. 传输到目标机
-
-```bash
-scp dns-edge-test-linux-amd64-*.tar.gz user@target-server:/tmp/
-```
-
-### 3. 目标机部署
-
-```bash
-# 解压
-cd /tmp
-tar -xzf dns-edge-test-linux-amd64-*.tar.gz
-cd dns-edge-test-linux-amd64-*/
-
-# 部署（默认安装到 /opt/dns-edge）
-sudo make install
-```
-
-部署完成后服务自动启动，可通过 `sudo make status` 查看状态。
-
----
-
-## 本地编译打包
-
-### 基础用法
-
-```bash
-# 使用默认配置打包
-make release-package
-```
-
-默认行为：
-- 配置文件：`Corefile`（项目根目录）
-- 目标平台：`linux/amd64`
-- 压缩包名：`dns-edge-linux-amd64-<git-tag>.tar.gz`
-
-### 指定配置文件
-
-```bash
-# 打包时使用 Corefile.test
-make release-package CONFIG_SRC=Corefile.test
-
-# 打包时使用 Corefile.prod
-make release-package CONFIG_SRC=Corefile.prod
-```
-
-### 指定压缩包中缀
-
-```bash
-# 压缩包名带 test 标识：dns-edge-test-linux-amd64-xxx.tar.gz
-make release-package RELEASE_INFIX=test
-
-# 压缩包名带 prod 标识：dns-edge-prod-linux-amd64-xxx.tar.gz
-make release-package RELEASE_INFIX=prod
-```
-
-### 指定目标平台
-
-```bash
-# 交叉编译 ARM64
-make release-package TARGET_OS=linux TARGET_ARCH=arm64
-
-# macOS
-make release-package TARGET_OS=darwin TARGET_ARCH=amd64
-```
-
-### 完整示例
-
-```bash
-# 打包生产环境，ARM64 平台
-make release-package \
-  CONFIG_SRC=Corefile.prod \
-  RELEASE_INFIX=prod \
-  TARGET_OS=linux \
-  TARGET_ARCH=arm64
-# 生成: dns-edge-prod-linux-arm64-<git-tag>.tar.gz
-```
-
-### 生成校验和
-
-```bash
-# 打包并生成 SHA256 校验和
-make release-checksum CONFIG_SRC=Corefile.test RELEASE_INFIX=test
+/home/<user>/dns_dev/ # dns-edge 项目
 ```
 
 ---
 
-## 目标机部署
-
-### 默认部署（推荐）
-
-解压后直接安装到 `/opt/dns-edge`：
+## 一、MySQL 初始化
 
 ```bash
-tar -xzf dns-edge-test-linux-amd64-*.tar.gz
-cd dns-edge-test-linux-amd64-*/
-sudo make install
-```
-
-**安装后的目录结构：**
-
-```
-/opt/dns-edge/
-├── bin/
-│   └── dns-edge          # 二进制可执行文件
-├── etc/
-│   ├── Corefile          # 配置文件
-│   └── env               # 环境变量文件（可选）
-└── data/                 # 工作目录
-
-/etc/systemd/system/
-└── dns-edge.service      # systemd 服务单元
-```
-
-### 重复安装（覆盖升级）
-
-`make install` 会自动：
-1. 停止正在运行的 dns-edge 服务
-2. 替换二进制文件
-3. 覆盖配置文件（`Corefile`）
-4. 重启服务
-
-**升级流程：**
-
-```bash
-# 传输新版本压缩包到目标机
-scp dns-edge-test-linux-amd64-new.tar.gz user@target:/tmp/
-
-# 目标机操作
-cd /tmp
-tar -xzf dns-edge-test-linux-amd64-new.tar.gz
-cd dns-edge-test-linux-amd64-*/
-sudo make install  # 自动停止旧服务，替换文件，启动新服务
+mysql -u root -p <<'SQL'
+CREATE DATABASE IF NOT EXISTS db_edge CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+SQL
 ```
 
 ---
 
-## 服务管理
-
-部署后服务已自动启动，使用以下命令管理：
+## 二、编译 edgeapi
 
 ```bash
-# 查看服务状态
-sudo make status
-# 或
-sudo systemctl status dns-edge
-
-# 启动服务
-sudo make start
-
-# 停止服务
-sudo make stop
-
-# 重启服务
-sudo make restart
-
-# 查看日志
-sudo journalctl -u dns-edge -f
-
-# 查看最近 100 行日志
-sudo journalctl -u dns-edge -n 100
+cd /home/<user>/Git_repo/edgeapi
+mkdir -p build
+go build -o build/edge-api ./cmd/edge-api/
 ```
 
-### 修改配置后重启
+### 配置文件
 
-```bash
-# 编辑配置文件
-sudo vim /opt/dns-edge/etc/Corefile
+配置放在 `configs/`（和 `build/` 同级，Tea.Root 会找到）：
 
-# 重启服务使配置生效
-sudo make restart
+**`configs/.db.yaml`**（edgeapi 实际读取的数据库配置）
+```yaml
+default:
+  driver: mysql
+  dsn: "root:你的密码@tcp(127.0.0.1:3306)/db_edge?charset=utf8mb4&parseTime=True"
 ```
 
----
-
-## 自定义安装路径
-
-如果需要安装到非默认路径（比如 `/usr/local`），使用以下参数：
-
-```bash
-sudo make install \
-  PREFIX=/usr/local \
-  ETC_DIR=/etc/dns-edge \
-  DATA_DIR=/var/lib/dns-edge
+**`configs/db.yaml`**（旧格式兼容，两个都建）
+```yaml
+host: 127.0.0.1:3306
+database: db_edge
+user: root
+password: "你的密码"
+prefix: edge
 ```
 
-**安装后的路径：**
-- 二进制：`/usr/local/bin/dns-edge`
-- 配置：`/etc/dns-edge/Corefile`
-- 数据：`/var/lib/dns-edge/`
+`configs/api.yaml` 首次启动后自动生成，**不需要手动创建**。
 
-**注意**：`make install` 会自动根据参数修改 systemd 服务文件中的路径，无需手动编辑 `dns-edge.service`。
-
----
-
-## 卸载
+### 首次启动 edgeapi
 
 ```bash
-cd /path/to/unpacked/release/
-sudo make uninstall
+cd /home/<user>/Git_repo/edgeapi
+./build/edge-api
 ```
 
-卸载操作会：
-1. 停止并禁用 dns-edge 服务
-2. 删除 systemd 服务文件
-3. 删除二进制文件
+首次启动会自动建表并输出管理节点凭证，**记录以下信息**（edgeadmin 配置需要）：
 
-**配置文件不会被删除**，保留在 `/opt/dns-edge/etc/`（或自定义的 `ETC_DIR`），方便重新安装时恢复配置。
-
-如需完全删除，手动执行：
-
-```bash
-sudo rm -rf /opt/dns-edge
+```
+[API_NODE]admin node id: 22d93a9e...
+[API_NODE]admin node secret: pg05i8JW...
 ```
 
 ---
 
-## 开发者命令
-
-### 本地构建
+## 三、编译 edgeadmin
 
 ```bash
-# 编译二进制到 bin/dns-edge
-make build
+cd /home/<user>/Git_repo
 
-# 运行单元测试
-make test
+# edgeadmin 的 go.mod 有 replace => ../EdgeCommon，需要软链接
+ln -s edgecommon EdgeCommon   # 如果 EdgeCommon 不存在
 
-# 清理编译产物
-make clean
-
-# 整理依赖
-make tidy
+cd edgeadmin
+mkdir -p build
+go build -o build/edge-admin ./cmd/edge-admin/
 ```
 
-### 本地安装（开发机）
+### 配置文件
+
+**`configs/api_admin.yaml`**
+```yaml
+rpc.endpoints: [ "http://127.0.0.1:8031" ]
+nodeId: "edgeapi 首次启动输出的 adminNodeId"
+secret: "edgeapi 首次启动输出的 adminNodeSecret"
+```
+
+**`configs/server.yaml`**
+```yaml
+env: prod
+http:
+  "on": true
+  listen: [ "0.0.0.0:7788" ]
+https:
+  "on": false
+```
+
+### 创建管理员账号
+
+edgeapi 初始化后管理员表为空，需手动插入：
 
 ```bash
-# 从源码编译并安装到本机
-sudo make install
+mysql -u root -p db_edge <<'SQL'
+INSERT INTO edgeAdmins (username, password, fullName, isSuper, canLogin, state, createdAt)
+VALUES ('admin', MD5('admin'), '管理员', 1, 1, 1, UNIX_TIMESTAMP());
+SQL
+```
+
+> 生产环境将 `MD5('admin')` 换成 `MD5('强密码')`。
+
+### 启动 edgeadmin
+
+```bash
+cd /home/<user>/Git_repo/edgeadmin
+mkdir -p logs
+./build/edge-admin >> logs/run.log 2>&1 &
+```
+
+访问 `http://<ip>:7788`，用 `admin` / `admin` 登录。
+
+---
+
+## 四、编译 dns-edge
+
+```bash
+cd /home/<user>/dns_dev
+go build -o /usr/local/bin/dns-edge ./cmd/dns-edge/
+```
+
+### 配置文件
+
+**`Corefile.local`**（无 PG 模式，GoEdge 通过 edgeDNSAPI 管理记录）
+
+```
+dns-edge {
+    listen  :5300
+    workers 0
+    tcp     true
+
+    api {
+        listen :8080
+
+        edgedns_access_key_id     your-key-id
+        edgedns_access_key_secret your-key-secret
+    }
+
+    sync {
+        interval  30s
+        prob      0.01
+        ratelimit 100
+    }
+}
+```
+
+> `edgedns_access_key_id` / `secret` 自定义，两边（Corefile 和 EdgeAdmin DNS 服务商配置）要一致。
+
+### 启动 dns-edge
+
+```bash
+cd /home/<user>/dns_dev
+nohup dns-edge -config Corefile.local >> /var/log/dns-edge.log 2>&1 &
 ```
 
 ---
 
-## 故障排查
+## 五、在 GoEdge 配置 edgeDNSAPI Provider
 
-### 服务启动失败
+### 5.1 添加 DNS 服务商
 
-```bash
-# 查看详细错误日志
-sudo journalctl -u dns-edge -n 50 --no-pager
+登录 EdgeAdmin → **DNS 管理** → **DNS 服务商** → 新建：
 
-# 检查配置文件语法
-/opt/dns-edge/bin/dns-edge -config /opt/dns-edge/etc/Corefile --help
-```
+| 字段 | 值 |
+|------|---|
+| 名称 | 任意，如 `dns-edge-01` |
+| 类型 | `EdgeDNS API` |
+| Host | `http://<dns-edge-ip>:8080` |
+| Access Key ID | 和 Corefile 里 `edgedns_access_key_id` 一致 |
+| Access Key Secret | 和 Corefile 里 `edgedns_access_key_secret` 一致 |
 
-### 端口冲突
+### 5.2 添加 DNS 域名
 
-如果 DNS 端口（默认 53）或 API 端口（默认 8080）被占用：
+进入刚建的服务商 → **新建域名**，填写要管理的域名（如 `example.com`）。
 
-```bash
-# 检查端口占用
-sudo ss -tulnp | grep -E ':(53|8080)'
+### 5.3 绑定 CDN 集群
 
-# 编辑 Corefile 修改端口
-sudo vim /opt/dns-edge/etc/Corefile
-# 修改 listen 和 api 行
-# 然后重启服务
-sudo make restart
-```
+EdgeAdmin → **节点管理** → **集群** → 选集群 → **DNS** 标签页：
+- 选择 DNS 域名
+- 填写二级域名前缀（如 `node`，节点 A 记录会是 `node.example.com`）
 
-### PostgreSQL 连接失败
+### 5.4 同步
 
-检查 `/opt/dns-edge/etc/Corefile` 中的 `postgres { dsn ... }` 配置：
-
-```bash
-# 使用 psql 测试连接
-psql "postgres://user:pass@host:5432/dbname?sslmode=disable"
-```
-
-### Nacos 连接失败
-
-检查防火墙是否允许访问 Nacos 端口（18848, 19848），并确认 `nacos { ... }` 块配置正确。
+在 DNS 域名页点「同步」，GoEdge 把集群节点 IP 推送到 dns-edge。
 
 ---
 
-## 参数速查表
-
-### 打包参数
-
-| 参数 | 默认值 | 说明 | 示例 |
-|------|--------|------|------|
-| `CONFIG_SRC` | `Corefile` | 打包的配置文件 | `CONFIG_SRC=Corefile.test` |
-| `RELEASE_INFIX` | _(空)_ | 压缩包中缀标识 | `RELEASE_INFIX=prod` |
-| `TARGET_OS` | `linux` | 目标操作系统 | `TARGET_OS=darwin` |
-| `TARGET_ARCH` | `amd64` | 目标架构 | `TARGET_ARCH=arm64` |
-
-### 安装参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `PREFIX` | `/opt/dns-edge` | 安装根目录 |
-| `ETC_DIR` | `$(PREFIX)/etc` | 配置目录 |
-| `DATA_DIR` | `$(PREFIX)/data` | 数据目录 |
-
----
-
-## 常见部署场景
-
-### 场景 1：测试环境快速部署
+## 六、验证
 
 ```bash
-# 本机打包
-make release-package CONFIG_SRC=Corefile.test RELEASE_INFIX=test
+# DNS 解析
+dig @<dns-edge-ip> -p 5300 <子域名>.<域名> A +short
 
-# 传输并部署
-scp dns-edge-test-*.tar.gz test-server:/tmp/
-ssh test-server "cd /tmp && tar -xzf dns-edge-test-*.tar.gz && cd dns-edge-test-* && sudo make install"
-```
-
-### 场景 2：生产环境部署（多节点）
-
-```bash
-# 本机打包生产版本
-make release-package CONFIG_SRC=Corefile.prod RELEASE_INFIX=prod
-
-# 批量部署到多台服务器
-for host in prod-dns-01 prod-dns-02 prod-dns-03; do
-  scp dns-edge-prod-*.tar.gz $host:/tmp/
-  ssh $host "cd /tmp && tar -xzf dns-edge-prod-*.tar.gz && cd dns-edge-prod-* && sudo make install"
-done
-```
-
-### 场景 3：灰度升级
-
-```bash
-# 打包新版本
-make release-package CONFIG_SRC=Corefile.prod RELEASE_INFIX=prod
-
-# 先升级一台验证
-scp dns-edge-prod-*.tar.gz canary-server:/tmp/
-ssh canary-server "cd /tmp && tar -xzf dns-edge-prod-*.tar.gz && cd dns-edge-prod-* && sudo make install"
-
-# 验证无误后，滚动升级其他节点
-# ...
+# API 健康检查
+curl http://<dns-edge-ip>:8080/healthz
+# → {"status":"ok"}
 ```
 
 ---
 
-## 更多信息
+## 七、进程守护（systemd）
 
-- **测试文档**：[docs/test-plan.md](docs/test-plan.md)
-- **冒烟测试**：[docs/smoke-test.md](docs/smoke-test.md)
-- **技术设计**：[docs/technical-design.md](docs/technical-design.md)
-- **项目 README**：[README.md](README.md)
+**`/etc/systemd/system/edge-api.service`**
+```ini
+[Unit]
+Description=GoEdge API Node
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=/home/<user>/Git_repo/edgeapi/build
+ExecStart=/home/<user>/Git_repo/edgeapi/build/edge-api
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**`/etc/systemd/system/edge-admin.service`**
+```ini
+[Unit]
+Description=GoEdge Admin
+After=edge-api.service
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=/home/<user>/Git_repo/edgeadmin
+ExecStart=/home/<user>/Git_repo/edgeadmin/build/edge-admin
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**`/etc/systemd/system/dns-edge.service`**
+```ini
+[Unit]
+Description=dns-edge
+After=network.target
+
+[Service]
+Type=simple
+User=<user>
+WorkingDirectory=/home/<user>/dns_dev
+ExecStart=/usr/local/bin/dns-edge -config Corefile.local
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl daemon-reload
+systemctl enable --now edge-api edge-admin dns-edge
+```
+
+---
+
+## 八、常见问题
+
+**edgeadmin 启动找不到配置**
+
+`Tea.Root` 由二进制路径决定：二进制在 `build/` 子目录，`configs/` 和 `build/` 同级才能被找到。
+
+**edgeadmin 编译失败（找不到 EdgeCommon）**
+
+```bash
+ls /home/<user>/Git_repo/EdgeCommon  # 确认软链接存在
+ln -s edgecommon /home/<user>/Git_repo/EdgeCommon  # 不存在时创建
+```
+
+**dns-edge 重启后记录丢失**
+
+正常现象。dns-edge 纯内存存储，重启后在 EdgeAdmin DNS 域名页点「同步」恢复。
+
+**dig 返回空/NXDOMAIN**
+
+先确认 dns-edge 里有记录，再触发 EdgeAdmin 同步：
+```bash
+curl http://<dns-edge-ip>:8080/healthz
+# 然后 EdgeAdmin → DNS 服务商 → 域名 → 同步
+```
