@@ -6,6 +6,8 @@ GoEdge 是 DNS 记录的 source of truth。dns-edge 是 GoEdge 管理的边缘 D
 
 ```
 EdgeAdmin → edgeapi (GoEdge) → dns-edge edgeDNSAPI → ZoneStore → DNS 解析
+                  ↑
+      DNSTaskExecutor（20s tick，空检测 + 推送）
 ```
 
 **GoEdge 调用序列**（AddRecord 举例）：
@@ -13,6 +15,37 @@ EdgeAdmin → edgeapi (GoEdge) → dns-edge edgeDNSAPI → ZoneStore → DNS 解
 2. `POST /NSRecordService/CreateNSRecord {"nsDomainId":X,...}` → 创建记录
 
 GoEdge 不调用 CreateNSDomain，因此 `FindNSDomainWithName` 需要 lazy-create zone。
+
+## 自动恢复机制
+
+dns-edge 重启后内存清空，edgeapi 通过以下机制自动恢复：
+
+**文件**：`edgeapi/internal/tasks/dns_task_executor.go` → `resyncEmptyEdgeDNSProviders()`
+
+**逻辑**：
+1. 每 20s tick 时对所有 `edgeDNSAPI` 类型的 provider 调 `GetDomains()`
+2. 如果返回空列表（dns-edge 刚重启，内存为空），立即为该 provider 的所有集群插一条 `ClusterNodesChange` task
+3. `DNSTaskExecutor` 在下一轮 tick（最多再 20s）处理该 task，把集群节点 A 记录全部推到 dns-edge
+
+**实测**：dns-edge 重启后 **5 秒内** 记录恢复。
+
+**为什么不让 dns-edge 反向调 edgeapi**：
+- edgeapi 只暴露 gRPC（:8031），需要 admin/node 身份认证
+- dns-edge 没有这两种身份，引入 gRPC client + pb 依赖代价太大
+- 由 edgeapi 主动感知方向更简单，且不引入新的架构依赖
+
+## 我们实现了什么（补齐商业版）
+
+GoEdge 商业版 `edgeDNSAPI` provider 定义了协议（client 在 `provider_edge_dns_api.go`），但没有提供 server 实现。我们实现了这个 server：
+
+| 商业版已有 | 我们补充实现 |
+|-----------|-------------|
+| `EdgeDNSAPIProvider`（HTTP client） | dns-edge edgeDNSAPI server（14 个端点） |
+| `DNSTaskExecutor`（推送触发器） | 无 PG 模式（ZoneStore 纯内存后端） |
+| `localEdgeDNS` DNS 解析 | dns-edge DNS server（:5300，miekg/dns） |
+| 地理路由框架 | ip2region 五级路由（省/ISP/国家/运营商/默认） |
+| ECS 框架 | ECS client subnet pass-through stub |
+| — | 重启自动恢复（空检测 + 重推，edgeapi 侧） |
 
 ## no-PG 模式运行路径
 

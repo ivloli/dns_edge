@@ -49,25 +49,20 @@ EdgeAdmin → edgeapi (GRPC :8031) → dns-edge (HTTP :8080, DNS :5300)
 | 13 | ECS 地理路由（ip2region xdb，route_tags） | ✅ |
 | 14 | edgeDNSAPI 服务端（14 个 NS*Service 端点）| ✅ |
 | B方案 | no-PG 模式：edgeDNSAPI 直接读写 ZoneStore | ✅ |
+| 自动恢复 | edgeapi 空检测 + 重推：dns-edge 重启后 ≤20s 自动恢复 | ✅ |
 
 ## 当前状态（2026-06-26）
 
-**B方案联调已通过**：
+**全链路联调已通过，自动恢复机制已实现**：
 
-- `Corefile.local` 启动，无 PG DSN，API server 在 :8080
-- `FindNSDomainWithName` 自动 lazy-create zone
-- `CreateNSRecord` 写入 ZoneStore，DNS 立即可查询
-- 验证：
-  ```
-  POST /NSRecordService/CreateNSRecord  → nsRecordId: 1
-  dig @127.0.0.1 -p 5300 www.test.local A  → 10.0.0.1
-  ```
+- EdgeAdmin UI → DNS 管理 → edgeDNSAPI provider → 手动同步 → dig 返回集群节点 IP ✓
+- dns-edge 重启后，edgeapi 的 `DNSTaskExecutor` 在下一个 20s tick 检测到空 domain，自动推送记录
+- 实测：重启后 **5 秒内** 记录恢复，dig 返回 `10.100.0.1` ✓
 
 ## 待做
 
 | 优先级 | 任务 |
 |--------|------|
-| P1 | GoEdge edgeDNSAPI 联调：在 EdgeAdmin 配置 edgeDNSAPI provider，通过 UI 触发记录推送，验证 dig |
 | P5 | GoEdge customHTTP 联调 |
 | P12 | dns-control 中心控制服务 |
 | P15 | edgeapi NS 服务单元测试 |
@@ -84,3 +79,4 @@ EdgeAdmin → edgeapi (GRPC :8031) → dns-edge (HTTP :8080, DNS :5300)
 | 2026-06-25 | 保留 PG 模式，新增 no-PG 模式（B方案） | edgeDNSAPI 场景下 dns-edge 不需要持久化 |
 | 2026-06-26 | edgeDNSAPI 全部走 ZoneStore，不依赖 PG | GoEdge 是 source of truth，dns-edge 纯内存缓存 |
 | 2026-06-26 | FindNSDomainWithName lazy-create zone | GoEdge 不调用 CreateNSDomain，需自动建 zone |
+| 2026-06-26 | 自动恢复：edgeapi 空检测，不引入新依赖 | dns-edge 无法反向调 edgeapi（gRPC 认证壁垒），由 edgeapi 主动感知 |
