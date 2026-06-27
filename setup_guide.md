@@ -303,7 +303,9 @@ ln -s edgecommon /home/<user>/Git_repo/EdgeCommon  # 不存在时创建
 
 **dns-edge 重启后记录丢失**
 
-正常现象。dns-edge 纯内存存储，重启后在 EdgeAdmin DNS 域名页点「同步」恢复。
+无需手动操作。edgeapi 的 `DNSTaskExecutor` 每 20 秒检测一次 dns-edge 的 domain 列表，发现为空时自动触发重推。实测重启后 **5 秒到 20 秒内**记录自动恢复。
+
+如果等待超过 1 分钟仍未恢复，可手动在 EdgeAdmin DNS 域名页点「同步」强制触发。
 
 **dig 返回空/NXDOMAIN**
 
