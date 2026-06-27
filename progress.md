@@ -66,3 +66,43 @@
 | dns-edge | 运行中（:5300 DNS + :8080 API） |
 | edgeapi | 运行中（:8031 gRPC），含新自动恢复逻辑 |
 | EdgeAdmin | 运行中（:7788） |
+
+## 2026-06-27 — ECS 地理路由验证 + xdb 自动更新
+
+### 完成的工作
+
+1. **修复 geo parseRegion 字段索引**：
+   - 原代码按 5 字段格式（含「区域」）解析，实际 xdb 是 4 字段（`国家|省份|城市|ISP`）
+   - 修正字段索引，Province=parts[1]，ISP=parts[3]
+   - 新增 `normalizeProvince`（去掉「省」「市」）和 `normalizeISP`（去掉「中国」「云」）
+   - 参照 `/home/ivloli/Git_repo/dns/plugin/ecs_normalizer/util.go` 中的规范化逻辑
+
+2. **parseRegion 兼容多版本 xdb**：
+   - 4 字段（旧版）和 5 字段（新版 v3.x，含 CC 或区域=0）均正确解析
+
+3. **ECS 地理路由 5 场景全部验证通过**：
+   ```
+   浙江电信 122.224.0.1 → 3.3.3.3  (province+ISP 精确)  ✓
+   浙江移动 111.0.0.1   → 1.1.1.1  (province 匹配)       ✓
+   广东移动 183.232.0.1 → 2.2.2.2  (province 匹配)       ✓
+   北京联通 123.125.0.1 → 9.9.9.9  (默认)                ✓
+   无 ECS              → 随机      (clientIP=nil)         ✓
+   ```
+
+4. **ip2region xdb 自动更新**（`internal/geo/updater.go`）：
+   - 启动时后台检查 GitHub Releases，版本不同则下载新 xdb
+   - 热替换：原子 rename + `Router.swap()`，无需重启
+   - 定时 24h 检查，可配置 interval 和 github_token
+   - 实测：删除版本标记文件 → 重启 → 1 秒内下载并替换 v3.16.0 ✓
+
+### 新增文件
+
+- `internal/geo/updater.go` — xdb 自动更新器
+
+### 修改文件
+
+- `internal/geo/geo.go` — parseRegion/normalizeProvince/normalizeISP/Router.swap()
+- `config/config.go` — GeoConfig 新增 AutoUpdate/UpdateInterval/GithubToken
+- `config/parser.go` — 解析 geo 块新字段
+- `cmd/dns-edge/main.go` — 接入 Updater
+- `Corefile.local` — 启用 auto_update true, update_interval 24h

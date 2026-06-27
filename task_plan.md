@@ -50,14 +50,17 @@ EdgeAdmin → edgeapi (GRPC :8031) → dns-edge (HTTP :8080, DNS :5300)
 | 14 | edgeDNSAPI 服务端（14 个 NS*Service 端点）| ✅ |
 | B方案 | no-PG 模式：edgeDNSAPI 直接读写 ZoneStore | ✅ |
 | 自动恢复 | edgeapi 空检测 + 重推：dns-edge 重启后 ≤20s 自动恢复 | ✅ |
+| geo修复 | ip2region parseRegion 字段索引修正 + normalizeProvince/ISP | ✅ |
+| geo自动更新 | GitHub Releases 定时拉取最新 xdb，热替换无重启 | ✅ |
 
-## 当前状态（2026-06-26）
+## 当前状态（2026-06-27）
 
-**全链路联调已通过，自动恢复机制已实现**：
+**全链路联调已通过，ECS 地理路由验证完成，xdb 自动更新已实现**：
 
 - EdgeAdmin UI → DNS 管理 → edgeDNSAPI provider → 手动同步 → dig 返回集群节点 IP ✓
-- dns-edge 重启后，edgeapi 的 `DNSTaskExecutor` 在下一个 20s tick 检测到空 domain，自动推送记录
-- 实测：重启后 **5 秒内** 记录恢复，dig 返回 `10.100.0.1` ✓
+- dns-edge 重启后，edgeapi 的 `DNSTaskExecutor` 在下一个 20s tick 检测到空 domain，自动推送记录，实测 5 秒内恢复 ✓
+- ECS geo 路由 5 种场景全部验证通过：省+ISP 精确 > 省 > ISP > 国家 > 默认 ✓
+- ip2region xdb 启动时自动从 GitHub 拉取最新 release（v3.16.0），定时 24h 检查热更新 ✓
 
 ## 待做
 
@@ -80,3 +83,5 @@ EdgeAdmin → edgeapi (GRPC :8031) → dns-edge (HTTP :8080, DNS :5300)
 | 2026-06-26 | edgeDNSAPI 全部走 ZoneStore，不依赖 PG | GoEdge 是 source of truth，dns-edge 纯内存缓存 |
 | 2026-06-26 | FindNSDomainWithName lazy-create zone | GoEdge 不调用 CreateNSDomain，需自动建 zone |
 | 2026-06-26 | 自动恢复：edgeapi 空检测，不引入新依赖 | dns-edge 无法反向调 edgeapi（gRPC 认证壁垒），由 edgeapi 主动感知 |
+| 2026-06-27 | geo parseRegion 对齐参考项目（/Git_repo/dns） | 字段数按实际 xdb 版本判断（4/5字段），normalizeISP 去掉「中国」「云」 |
+| 2026-06-27 | ip2region xdb 自动更新（GitHub Releases） | xdb 数据库持续维护，定期拉取保证地理精度；hot-swap 无需重启 |

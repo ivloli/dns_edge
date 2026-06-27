@@ -168,10 +168,19 @@ dns-edge {
         prob      0.01
         ratelimit 100
     }
+
+    # 地理路由（可选）
+    geo {
+        xdb             /path/to/ip2region.xdb
+        auto_update     true      # 自动从 GitHub 拉取最新 xdb
+        update_interval 24h       # 检查间隔
+        # github_token  ghp_xxx   # 可选，避免 API 限频
+    }
 }
 ```
 
-> `edgedns_access_key_id` / `secret` 自定义，两边（Corefile 和 EdgeAdmin DNS 服务商配置）要一致。
+> `edgedns_access_key_id` / `secret` 自定义，两边（Corefile 和 EdgeAdmin DNS 服务商配置）要一致。  
+> `geo` 块可省略，省略后 DNS 解析不区分地域，所有请求返回全量记录（随机加权选择）。
 
 ### 启动 dns-edge
 

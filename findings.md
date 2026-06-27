@@ -63,7 +63,47 @@ main.go:
 - Record ID = 进程内 `atomic.AddInt64(&recordIDCounter, 1)`（重启后从 1 开始）
 - 所有读写直接操作 `s.store`（ZoneStore），零 PG 调用
 
-## GoEdge edgeDNSAPI 客户端（edgeapi 侧）
+## geo 路由实现细节
+
+### parseRegion 字段兼容
+
+ip2region xdb 存在多个版本，字段数不同：
+
+| 版本 | 格式 | 字段数 |
+|------|------|--------|
+| 旧版（edge/static/ip2region.xdb） | `国家\|省份\|城市\|ISP` | 4 |
+| v3.x 新版（GitHub Releases） | `国家\|省份\|城市\|ISP\|CC` | 5 |
+| 部分中间版本 | `国家\|0\|省份\|城市\|ISP` | 5（区域字段为0） |
+
+`internal/geo/geo.go` 的 `parseRegion` 按字段数 switch，均正确提取省份和 ISP。
+
+`normalizeProvince`：TrimSuffix `省`/`市`，让「浙江省」→「浙江」和 GoEdge 路线名对齐。  
+`normalizeISP`：去掉「中国」「云」前缀，让「中国电信」→「电信」。
+
+### 五级路由优先级
+
+```
+province+ISP > province > ISP > country > default > all records
+```
+
+**ECS 验证结果**（2026-06-27）：
+
+| IP | 实际归属 | 命中规则 | 返回 |
+|----|---------|---------|------|
+| 122.224.0.1 | 浙江电信 | province:浙江 + isp:电信 | 3.3.3.3 ✓ |
+| 111.0.0.1 | 浙江移动 | province:浙江 | 1.1.1.1 ✓ |
+| 183.232.0.1 | 广东移动 | province:广东 | 2.2.2.2 ✓ |
+| 123.125.0.1 | 北京联通 | 无匹配→默认 | 9.9.9.9 ✓ |
+| 无ECS | — | clientIP=nil，随机 | 任意 ✓ |
+
+### xdb 自动更新
+
+**文件**：`internal/geo/updater.go`
+
+- 启动时后台 goroutine 调 `CheckAndUpdate(force=false)`：版本标记一致则跳过，否则下载
+- `Start(ctx)` 按 `update_interval`（默认 24h）定期检查
+- 下载：GitHub Releases API → tarball → 提取 `data/ip2region_v4.xdb` → 原子 rename → `Router.swap()` 热替换
+- Corefile 配置：`auto_update true`、`update_interval 24h`、`github_token <token>`（可选）
 
 文件：`/home/ivloli/Git_repo/edgeapi/internal/dnsclients/provider_edge_dns_api.go`
 
