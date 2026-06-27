@@ -89,36 +89,57 @@ func (r *Router) Lookup(ip net.IP) GeoInfo {
 }
 
 // parseRegion parses ip2region's pipe-separated result.
-// Actual format (4 fields): "国家|省份|城市|ISP"
-// Fields beyond index 3 are ignored.
+// Handles two known xdb data versions:
+//   - 4 fields: "国家|省份|城市|ISP"         (our current xdb)
+//   - 5 fields: "国家|0|省份|城市|ISP" or "国家|省份|城市|中国电信|CN"
 func parseRegion(raw string) GeoInfo {
-	parts := strings.SplitN(raw, "|", 5)
-	get := func(i int) string {
-		if i >= len(parts) {
-			return ""
+	parts := strings.Split(raw, "|")
+	var province, isp string
+	switch len(parts) {
+	case 4:
+		// "中国|浙江省|绍兴市|电信"
+		province = normalizeProvince(strings.TrimSpace(parts[1]))
+		isp = normalizeISP(strings.TrimSpace(parts[3]))
+	case 5:
+		if strings.TrimSpace(parts[1]) == "0" {
+			// "中国|0|广东省|广州市|电信"
+			province = normalizeProvince(strings.TrimSpace(parts[2]))
+			isp = normalizeISP(strings.TrimSpace(parts[4]))
+		} else {
+			// "中国|广东省|广州市|中国电信|CN"
+			province = normalizeProvince(strings.TrimSpace(parts[1]))
+			isp = normalizeISP(strings.TrimSpace(parts[3]))
 		}
-		v := strings.TrimSpace(parts[i])
-		if v == "0" || v == "" {
-			return ""
-		}
-		return v
+	default:
+		return GeoInfo{}
 	}
-	return GeoInfo{
-		Country:  get(0),
-		Province: normalizeProvince(get(1)),
-		ISP:      get(3),
+	country := strings.TrimSpace(parts[0])
+	if country == "0" {
+		country = ""
 	}
+	return GeoInfo{Country: country, Province: province, ISP: isp}
 }
 
-// normalizeProvince strips trailing administrative suffixes so "浙江省" → "浙江",
-// "内蒙古自治区" → "内蒙古", matching the short names GoEdge uses in route codes.
-func normalizeProvince(p string) string {
-	for _, suffix := range []string{"省", "市", "自治区", "特别行政区"} {
-		if strings.HasSuffix(p, suffix) {
-			return p[:len(p)-len(suffix)]
-		}
+// normalizeProvince strips trailing "省" / "市".
+func normalizeProvince(s string) string {
+	s = strings.TrimSuffix(s, "省")
+	s = strings.TrimSuffix(s, "市")
+	s = strings.TrimSpace(s)
+	if s == "0" {
+		return ""
 	}
-	return p
+	return s
+}
+
+// normalizeISP strips "中国" and "云" prefixes to match GoEdge route short names.
+func normalizeISP(s string) string {
+	s = strings.ReplaceAll(s, "中国", "")
+	s = strings.ReplaceAll(s, "云", "")
+	s = strings.TrimSpace(s)
+	if s == "0" {
+		return ""
+	}
+	return s
 }
 
 // Match reports whether geo matches routeTags.
