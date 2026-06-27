@@ -109,15 +109,15 @@ func main() {
 	}
 
 	// geo-routing (Phase 13): load xdb if configured
-	var geoRouter *geo.Router
+	var geoRouter dnshandler.GeoLookup // interface — stays nil when xdb not configured
 	if cfg.Geo.XDBPath != "" {
-		var geoErr error
-		geoRouter, geoErr = geo.New(cfg.Geo.XDBPath)
+		r, geoErr := geo.New(cfg.Geo.XDBPath)
 		if geoErr != nil {
 			log.Warn("geo-routing disabled: failed to load xdb", zap.String("path", cfg.Geo.XDBPath), zap.Error(geoErr))
 		} else {
 			log.Info("geo-routing enabled", zap.String("xdb", cfg.Geo.XDBPath))
-			defer geoRouter.Close()
+			defer r.Close()
+			geoRouter = r
 		}
 	}
 

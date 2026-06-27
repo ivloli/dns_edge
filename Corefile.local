@@ -19,4 +19,8 @@ dns-edge {
         prob      0.01
         ratelimit 100
     }
+
+    geo {
+        xdb /home/ivloli/edge/static/ip2region.xdb
+    }
 }

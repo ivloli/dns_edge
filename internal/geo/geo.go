@@ -89,10 +89,10 @@ func (r *Router) Lookup(ip net.IP) GeoInfo {
 }
 
 // parseRegion parses ip2region's pipe-separated result.
-// Format: "国家|区域|省份|城市|ISP"
-// Fields beyond index 4 are ignored.
+// Actual format (4 fields): "国家|省份|城市|ISP"
+// Fields beyond index 3 are ignored.
 func parseRegion(raw string) GeoInfo {
-	parts := strings.SplitN(raw, "|", 6)
+	parts := strings.SplitN(raw, "|", 5)
 	get := func(i int) string {
 		if i >= len(parts) {
 			return ""
@@ -105,9 +105,20 @@ func parseRegion(raw string) GeoInfo {
 	}
 	return GeoInfo{
 		Country:  get(0),
-		Province: get(2),
-		ISP:      get(4),
+		Province: normalizeProvince(get(1)),
+		ISP:      get(3),
 	}
+}
+
+// normalizeProvince strips trailing administrative suffixes so "浙江省" → "浙江",
+// "内蒙古自治区" → "内蒙古", matching the short names GoEdge uses in route codes.
+func normalizeProvince(p string) string {
+	for _, suffix := range []string{"省", "市", "自治区", "特别行政区"} {
+		if strings.HasSuffix(p, suffix) {
+			return p[:len(p)-len(suffix)]
+		}
+	}
+	return p
 }
 
 // Match reports whether geo matches routeTags.
