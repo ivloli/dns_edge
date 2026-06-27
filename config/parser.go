@@ -447,6 +447,28 @@ func (p *parser) parseGeo(cfg *GeoConfig) error {
 				return err
 			}
 			cfg.XDBPath = v
+		case "auto_update":
+			v, err := p.nextVal(key)
+			if err != nil {
+				return err
+			}
+			cfg.AutoUpdate = v == "true" || v == "on" || v == "1"
+		case "update_interval":
+			v, err := p.nextVal(key)
+			if err != nil {
+				return err
+			}
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return fmt.Errorf("line %d: invalid duration %q: %w", key.line, v, err)
+			}
+			cfg.UpdateInterval = d
+		case "github_token":
+			v, err := p.nextVal(key)
+			if err != nil {
+				return err
+			}
+			cfg.GithubToken = v
 		default:
 			return fmt.Errorf("line %d: unknown key %q in geo block", key.line, key.text)
 		}

@@ -22,6 +22,15 @@ type GeoConfig struct {
 	// XDBPath is the path to the ip2region .xdb database file.
 	// Empty = geo-routing disabled.
 	XDBPath string
+
+	// AutoUpdate enables periodic xdb refresh from GitHub Releases.
+	AutoUpdate bool
+
+	// UpdateInterval between release checks. Defaults to 24h.
+	UpdateInterval time.Duration
+
+	// GithubToken is an optional personal access token to avoid API rate limits.
+	GithubToken string
 }
 
 type APIConfig struct {

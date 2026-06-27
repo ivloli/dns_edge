@@ -110,6 +110,7 @@ func main() {
 
 	// geo-routing (Phase 13): load xdb if configured
 	var geoRouter dnshandler.GeoLookup // interface — stays nil when xdb not configured
+	var geoUpdater *geo.Updater
 	if cfg.Geo.XDBPath != "" {
 		r, geoErr := geo.New(cfg.Geo.XDBPath)
 		if geoErr != nil {
@@ -118,6 +119,20 @@ func main() {
 			log.Info("geo-routing enabled", zap.String("xdb", cfg.Geo.XDBPath))
 			defer r.Close()
 			geoRouter = r
+
+			if cfg.Geo.AutoUpdate {
+				geoUpdater = geo.NewUpdater(geo.UpdaterConfig{
+					GithubToken:     cfg.Geo.GithubToken,
+					Interval:        cfg.Geo.UpdateInterval,
+					DownloadTimeout: 10 * time.Minute,
+				}, cfg.Geo.XDBPath, r, log)
+				// startup check in background (non-blocking)
+				go func() {
+					if err := geoUpdater.CheckAndUpdate(false); err != nil {
+						log.Warn("ip2region startup update check failed", zap.Error(err))
+					}
+				}()
+			}
 		}
 	}
 
@@ -132,6 +147,9 @@ func main() {
 
 	if pgSyncer != nil {
 		go pgSyncer.Start(ctx)
+	}
+	if geoUpdater != nil {
+		go geoUpdater.Start(ctx)
 	}
 
 	udpSrv := &mdns.Server{Net: "udp", Addr: cfg.Listen, Handler: mux}

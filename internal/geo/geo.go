@@ -69,6 +69,18 @@ func (r *Router) Close() {
 	}
 }
 
+// swap atomically replaces the underlying searcher with a newly loaded one.
+// The old searcher is closed. Called by the updater after a hot reload.
+func (r *Router) swap(newSearcher *xdb.Searcher) {
+	r.mu.Lock()
+	old := r.searcher
+	r.searcher = newSearcher
+	r.mu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+}
+
 // Lookup returns geographic information for ip.
 // Returns zero-value GeoInfo (all empty) on any error or when ip is nil.
 func (r *Router) Lookup(ip net.IP) GeoInfo {
