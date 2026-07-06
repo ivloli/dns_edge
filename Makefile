@@ -1,5 +1,6 @@
 .PHONY: all build test tidy clean install uninstall start stop restart status \
-	prepare-release build-release release-package release-checksum
+	prepare-release build-release release-package release-checksum \
+	run-local stop-local restart-local deploy-local status-local
 
 APP_NAME := dns-edge
 BIN_DIR := bin
@@ -14,6 +15,12 @@ RELEASE_PATH := $(RELEASE_DIR)/$(RELEASE_NAME)
 RELEASE_BIN := $(RELEASE_PATH)/$(APP_NAME)
 RELEASE_TAR := $(RELEASE_NAME).tar.gz
 CONFIG_SRC ?= Corefile
+
+RUN_DIR := .run
+LOCAL_CONFIG ?= Corefile.local
+LOCAL_PID := $(RUN_DIR)/dns-edge.pid
+LOCAL_LOG := $(RUN_DIR)/dns-edge.log
+LOCAL_HEALTHZ ?= http://127.0.0.1:8080/healthz
 
 PREFIX ?= /opt/dns-edge
 INSTALL_BIN := $(PREFIX)/bin/$(APP_NAME)
@@ -36,6 +43,50 @@ tidy:
 
 clean:
 	rm -rf $(BIN_DIR) $(RELEASE_DIR)
+
+# ── local (no-sudo, no-systemd) dev/test-env targets ────────────────────────
+# For boxes without passwordless sudo, where the systemd-based install/start/
+# stop/restart targets below can't run. Tracks the process via a PID file
+# under $(RUN_DIR) instead of a system service.
+
+run-local: build
+	@install -d -m 755 $(RUN_DIR)
+	@if [ -f $(LOCAL_PID) ] && kill -0 "$$(cat $(LOCAL_PID))" 2>/dev/null; then \
+		echo "$(APP_NAME) already running (pid $$(cat $(LOCAL_PID)))"; \
+	else \
+		nohup $(BIN_PATH) -config $(LOCAL_CONFIG) > $(LOCAL_LOG) 2>&1 & \
+		echo $$! > $(LOCAL_PID); \
+		sleep 1; \
+		echo "Started $(APP_NAME) (pid $$(cat $(LOCAL_PID))), log: $(LOCAL_LOG)"; \
+	fi
+
+stop-local:
+	@if [ -f $(LOCAL_PID) ]; then \
+		pid="$$(cat $(LOCAL_PID))"; \
+		if kill -0 "$$pid" 2>/dev/null; then \
+			kill "$$pid" && echo "Stopped $(APP_NAME) (pid $$pid)"; \
+		else \
+			echo "$(APP_NAME) not running (stale pid $$pid)"; \
+		fi; \
+		rm -f $(LOCAL_PID); \
+	else \
+		echo "$(APP_NAME) not running (no pid file)"; \
+	fi
+
+restart-local: stop-local run-local
+
+deploy-local: restart-local
+	@sleep 1
+	@curl -sf $(LOCAL_HEALTHZ) >/dev/null \
+		&& echo "$(APP_NAME) healthz OK ($(LOCAL_HEALTHZ))" \
+		|| (echo "$(APP_NAME) healthz FAILED ($(LOCAL_HEALTHZ))"; exit 1)
+
+status-local:
+	@if [ -f $(LOCAL_PID) ] && kill -0 "$$(cat $(LOCAL_PID))" 2>/dev/null; then \
+		echo "$(APP_NAME) running (pid $$(cat $(LOCAL_PID)))"; \
+	else \
+		echo "$(APP_NAME) not running"; \
+	fi
 
 install:
 	@echo "Installing $(APP_NAME)..."

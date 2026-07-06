@@ -14,6 +14,7 @@ Corefile
 /dns-edge-local
 /dns-edge-local.log
 /release/*/dns-edge
+/bin/
 
 # 本地一键部署用的 PID/日志目录
 /.run/
