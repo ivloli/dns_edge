@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>智能DNS（NS）模块说明</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f7fa; color: #2c3e50; margin: 0; padding: 24px 32px 60px; line-height: 1.6; }
+  h1 { font-size: 24px; margin-bottom: 4px; }
+  .subtitle { color: #7f8c8d; font-size: 14px; margin-bottom: 28px; }
+  h2 { font-size: 18px; font-weight: 700; margin: 40px 0 6px; color: #1a2733; display: flex; align-items: center; gap: 10px; }
+  h2 .num { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 50%; background: #3498db; color: #fff; font-size: 13px; font-weight: 700; flex: none; }
+  h3 { font-size: 14px; font-weight: 600; margin: 20px 0 8px; color: #34495e; }
+  .module-meta { font-size: 12px; color: #95a5a6; margin: 0 0 14px 36px; }
+  .module-meta code { background: #eef1f4; padding: 1px 6px; border-radius: 3px; }
+  p { margin: 8px 0; }
+  .section-body { margin-left: 36px; }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin: 20px 0 36px; }
+  .card { background: #fff; border-radius: 10px; padding: 16px 16px 14px; box-shadow: 0 1px 3px rgba(0,0,0,.08); border-top: 3px solid var(--c); }
+  .card .icon { font-size: 20px; margin-bottom: 6px; }
+  .card .name { font-weight: 700; font-size: 14px; color: #1a2733; }
+  .card .desc { font-size: 12px; color: #7f8c8d; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.08); margin: 10px 0 18px; }
+  th { background: #eef1f4; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; padding: 9px 14px; text-align: left; color: #7f8c8d; }
+  td { padding: 9px 14px; font-size: 13px; border-top: 1px solid #f2f2f2; vertical-align: top; }
+  tr:hover td { background: #fafbfc; }
+  code { font-family: 'Menlo', 'Courier New', monospace; font-size: 12px; background: #eef1f4; padding: 1px 6px; border-radius: 3px; color: #444; }
+  .path { font-weight: 600; }
+  .note { background: #fff8e6; border-left: 3px solid #f0ad4e; padding: 10px 14px; border-radius: 4px; font-size: 12.5px; color: #7a5c17; margin: 12px 0; }
+  .tip { background: #eaf6ff; border-left: 3px solid #3498db; padding: 10px 14px; border-radius: 4px; font-size: 12.5px; color: #1a5276; margin: 12px 0; }
+  .gap-note { background: #fdeeee; border-left: 3px solid #e74c3c; padding: 10px 14px; border-radius: 4px; font-size: 12.5px; color: #922b21; margin: 12px 0; }
+  .flow { display: flex; align-items: stretch; gap: 0; margin: 20px 0 36px; flex-wrap: wrap; }
+  .flow-box { background: #fff; border-radius: 8px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); min-width: 150px; flex: 1; }
+  .flow-box .t { font-weight: 700; font-size: 13px; color: #1a2733; }
+  .flow-box .s { font-size: 11.5px; color: #7f8c8d; margin-top: 4px; }
+  .flow-arrow { display: flex; align-items: center; justify-content: center; padding: 0 10px; color: #b0bac3; font-size: 20px; flex: none; }
+  .toc { background: #fff; border-radius: 10px; padding: 16px 20px; box-shadow: 0 1px 3px rgba(0,0,0,.08); margin-bottom: 30px; }
+  .toc a { color: #2c7be5; text-decoration: none; font-size: 13px; }
+  .toc a:hover { text-decoration: underline; }
+  .toc ul { margin: 6px 0 0; padding-left: 18px; }
+  .toc li { margin: 3px 0; }
+  footer { margin-top: 50px; font-size: 12px; color: #b0bac3; }
+</style>
+</head>
+<body>
+
+<h1>智能DNS（NS）模块说明</h1>
+<p class="subtitle">EdgeAdmin 左侧「智能DNS」菜单下各模块的作用与关键概念 &nbsp;·&nbsp; 2026-07-02</p>
+
+<div class="toc">
+  <strong style="font-size:13px;">目录</strong>
+  <ul>
+    <li><a href="#arch">整体架构：这套系统是怎么工作的</a></li>
+    <li><a href="#m1">1. 数据看板 — 全局运行状态一眼看清</a></li>
+    <li><a href="#m2">2. 集群管理 — 一组对外提供解析服务的节点</a></li>
+    <li><a href="#m3">3. 域名管理 — 谁的域名，交给哪个集群解析</a></li>
+    <li><a href="#m4">4. 线路管理 — 让不同来源的用户得到不同的解析结果</a></li>
+    <li><a href="#m5">5. 套餐设置 — 限制每个用户能用多少资源</a></li>
+    <li><a href="#m6">6. 全局配置 — 系统级默认值</a></li>
+  </ul>
+</div>
+
+<h2 id="arch"><span class="num">·</span>整体架构：这套系统是怎么工作的</h2>
+<div class="section-body">
+<p>「智能DNS」不是一个独立产品，而是 GoEdge 平台里的<strong>权威 DNS 服务</strong>模块——别人买了你的域名解析服务后，把域名的 NS 记录指向你的 DNS 集群，之后所有对该域名的解析请求都会落到你的节点上，由你决定返回什么 IP。</p>
+<div class="flow">
+  <div class="flow-box">
+    <div class="t">EdgeAdmin（你现在用的后台）</div>
+    <div class="s">管理界面：建集群、加域名、配记录、看统计</div>
+  </div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box">
+    <div class="t">edgeapi（控制面）</div>
+    <div class="s">保存配置到数据库，是唯一的数据源（source of truth）</div>
+  </div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box">
+    <div class="t">dns-edge（数据面 / NS节点）</div>
+    <div class="s">真正对外提供 DNS 解析的服务，纯内存缓存，定期从 edgeapi 同步</div>
+  </div>
+  <div class="flow-arrow">→</div>
+  <div class="flow-box">
+    <div class="t">终端用户的 dig / 浏览器</div>
+    <div class="s">发起 DNS 查询，拿到解析结果</div>
+  </div>
+</div>
+<p>所以你在 EdgeAdmin 里做的每一个操作（建域名、加记录），本质上都是在改 edgeapi 数据库里的一份配置；这份配置再被各个 <code>dns-edge</code> 节点异步拉取过去，真正开始生效。这也是为什么「集群」「节点」是两个不同的东西——集群是逻辑分组，节点才是真正跑 <code>dns-edge</code>、接收查询的机器。</p>
+</div>
+
+<div class="card-grid">
+  <div class="card" style="--c:#3498db"><div class="icon">📊</div><div class="name">数据看板</div><div class="desc">整体运行状态、流量趋势</div></div>
+  <div class="card" style="--c:#2ecc71"><div class="icon">🖧</div><div class="name">集群管理</div><div class="desc">节点分组，DNS服务的物理载体</div></div>
+  <div class="card" style="--c:#9b59b6"><div class="icon">🌐</div><div class="name">域名管理</div><div class="desc">域名归属与解析记录</div></div>
+  <div class="card" style="--c:#e67e22"><div class="icon">🧭</div><div class="name">线路管理</div><div class="desc">按来源分流解析结果</div></div>
+  <div class="card" style="--c:#16a085"><div class="icon">📦</div><div class="name">套餐设置</div><div class="desc">用户能力上限模板</div></div>
+  <div class="card" style="--c:#7f8c8d"><div class="icon">⚙️</div><div class="name">全局配置</div><div class="desc">系统级默认参数</div></div>
+</div>
+
+<h2 id="m1"><span class="num">1</span>数据看板</h2>
+<p class="module-meta">路由 <code>/ns</code> &nbsp;·&nbsp; 接口 <code>NSService.ComposeNSBoard</code></p>
+<div class="section-body">
+<p>打开「智能DNS」看到的第一个页面。它不是一个可以操作的功能模块，而是把其他模块的数据汇总起来做成一眼能看懂的仪表盘，方便你判断"系统现在整体健不健康、忙不忙"。</p>
+<table>
+  <tr><th>看板项</th><th>含义</th></tr>
+  <tr><td>NS集群 / NS节点</td><td>当前有多少个集群、多少台节点在跑，节点数旁边如果出现红字，代表有节点离线了</td></tr>
+  <tr><td>域名 / 解析记录</td><td>系统里总共托管了多少个域名，配置了多少条 DNS 记录（A/CNAME/TXT 等）</td></tr>
+  <tr><td>24小时流量趋势 / 15天流量趋势</td><td>按小时/按天聚合的查询流量曲线，用来看流量的高峰低谷、是否有异常暴涨</td></tr>
+  <tr><td>域名访问排行</td><td>近24小时里被查询最多的域名 Top 10，用来快速定位"谁最忙"</td></tr>
+</table>
+<div class="tip">这些统计数据来自 <code>edgeNSRecordHourlyStats</code> 这张按小时聚合的流量表。真实环境里它由 dns-edge 节点上报查询日志累积出来；如果这张表是空的，看板的图表部分就会是空白（只是没数据可画，不代表功能坏了）。</div>
+</div>
+
+<h2 id="m2"><span class="num">2</span>集群管理</h2>
+<p class="module-meta">路由 <code>/ns/clusters</code> &nbsp;·&nbsp; 接口 <code>NSClusterService</code> / <code>NSNodeService</code></p>
+<div class="section-body">
+<p><strong>集群 = 一组共享同一份 DNS 配置的节点。</strong>你可以把它理解成"一个 DNS 服务的部署单元"：一个集群下面挂几台机器（节点），这些机器跑的都是同一批域名和记录，互为主备、就近分流，只要有一台还活着，解析服务就不中断。</p>
+<table>
+  <tr><th>概念</th><th>说明</th></tr>
+  <tr><td>集群（Cluster）</td><td>逻辑分组，决定了"这批域名归哪套配置管"，本身不直接提供服务</td></tr>
+  <tr><td>节点（Node）</td><td>真正运行 <code>dns-edge</code> 进程、监听53端口对外解析的物理/虚拟机</td></tr>
+  <tr><td>集群主机名（Hosts）</td><td>这个集群对外暴露的 NS 主机名，例如 <code>ns1.example.com</code>，域名注册商那边要把域名的 NS 记录指向这些主机名</td></tr>
+</table>
+<div class="gap-note">当前版本创建/修改集群时还不能编辑 Hosts、TCP/UDP/TLS/DoH 等细项配置，这部分（"集群设置"完整子菜单，商业版有10个子tab）还在计划里，属于后续要补的功能。</div>
+</div>
+
+<h2 id="m3"><span class="num">3</span>域名管理</h2>
+<p class="module-meta">路由 <code>/ns/domains</code> &nbsp;·&nbsp; 接口 <code>NSDomainService</code> / <code>NSRecordService</code></p>
+<div class="section-body">
+<p>域名管理下面有两层：先加"域名"（比如 <code>example.com</code>），再在域名下加"解析记录"（比如 <code>www.example.com → 1.2.3.4</code>）。一个域名必须先挂到某个集群下，才会被那个集群的节点拿去对外解析。</p>
+<table>
+  <tr><th>概念</th><th>说明</th></tr>
+  <tr><td>域名（Domain）</td><td>要托管解析的根域名，需归属到某个集群；同名域名可以在不同集群下各建一份（互不影响）</td></tr>
+  <tr><td>解析记录（Record）</td><td>域名下的具体解析条目，支持 A/AAAA/CNAME/MX/TXT/NS/SRV/CAA 等常见类型</td></tr>
+  <tr><td>域名分组（Group）</td><td>给域名打标签分类，方便有很多域名时按分组筛选管理</td></tr>
+  <tr><td>@ 与 通配符</td><td>记录名填 <code>@</code> 表示根域名本身；填 <code>*</code> 表示通配符，匹配所有未单独配置的子域名</td></tr>
+</table>
+</div>
+
+<h2 id="m4"><span class="num">4</span>线路管理</h2>
+<p class="module-meta">路由 <code>/ns/routes</code>（含线路分类 <code>/ns/routes/categories</code>） &nbsp;·&nbsp; 接口 <code>NSRouteService</code> / <code>NSRouteCategoryService</code></p>
+<div class="section-body">
+<p>"线路"解决的问题是：<strong>同一个域名，不同地方的人查询，想让他们拿到不同的解析结果</strong>（最常见的场景是就近接入——国内用户解析到国内IP，海外用户解析到海外IP）。给一条 DNS 记录关联上"线路"后，系统会根据查询者的来源IP，自动匹配对应线路返回结果，没匹配上任何自定义线路的走默认结果。</p>
+<table>
+  <tr><th>概念</th><th>说明</th></tr>
+  <tr><td>线路（Route）</td><td>一段IP范围的集合 + 一个标识，比如"华东电信"对应哪些IP段</td></tr>
+  <tr><td>线路分类（Category）</td><td>给线路分组，比如"国内运营商""海外地区"，方便管理大量线路</td></tr>
+  <tr><td>优先级（Priority）</td><td>一个IP可能同时命中多条线路时，优先级数字小的线路优先生效</td></tr>
+</table>
+<div class="tip">如果你的域名不需要按地区/运营商返回不同结果（比如只有一套服务器），完全可以不配置线路，所有记录默认按无线路处理。</div>
+</div>
+
+<h2 id="m5"><span class="num">5</span>套餐设置</h2>
+<p class="module-meta">路由 <code>/ns/plans</code> &nbsp;·&nbsp; 接口 <code>NSPlanService</code></p>
+<div class="section-body">
+<p>如果 GoEdge 是给外部客户开放自助注册使用的（多租户场景），"套餐"就是用来限制每个用户能用多少资源的模板——类似云服务商的"套餐/规格"。给用户分配一个套餐，就等于给他设定了一组用量上限。</p>
+<table>
+  <tr><th>字段</th><th>作用</th></tr>
+  <tr><td>套餐名称 / 月价格 / 年价格</td><td>面向计费展示的基础信息</td></tr>
+  <tr><td>能力开关（当前版本待扩展）</td><td>商业版里套餐还能精确控制：是否允许自定义线路、最大域名数、每域名最大记录数、最小TTL、是否支持健康检查/API访问等——这些能力字段目前在「全局配置」里以"新用户默认值"的形式先实现了，套餐维度的精细化控制是下一步</td></tr>
+</table>
+</div>
+
+<h2 id="m6"><span class="num">6</span>全局配置</h2>
+<p class="module-meta">路由 <code>/ns/settings</code> &nbsp;·&nbsp; 接口 <code>SysSettingService</code>（通用键值配置，无专用 proto）</p>
+<div class="section-body">
+<p>整个 NS 模块唯一一处"系统级默认值"设置的地方，不针对具体某个域名或集群，而是影响"新用户/新数据默认长什么样"。</p>
+<h3>用户默认设置</h3>
+<table>
+  <tr><th>字段</th><th>作用</th></tr>
+  <tr><td>默认集群</td><td>新用户创建域名时，如果没有指定集群，默认挂到这个集群下</td></tr>
+  <tr><td>线路支持开关（国家/省份/运营商/Agent/公共）</td><td>新用户默认能不能用这几类线路，对应"线路管理"里线路的可选范围</td></tr>
+  <tr><td>功能支持开关（记录统计/域名别名/健康检查/API访问）</td><td>新用户默认能不能用这几项进阶功能</td></tr>
+  <tr><td>最大自定义线路数 / 最小TTL / 最大域名数 / 每域名最大记录数 / 每记录最大负载均衡记录数</td><td>新用户的默认配额上限，0 表示不限</td></tr>
+</table>
+<h3>域名归属验证</h3>
+<p>开启后，用户添加一个不属于自己的域名时需要先证明归属权（常见做法是要求解析一条指定的 TXT 记录），防止有人冒领别人的域名。</p>
+<h3>访问日志</h3>
+<table>
+  <tr><th>字段</th><th>作用</th></tr>
+  <tr><td>默认记录访问日志</td><td>全局默认是否把每次查询计入日志/统计，各集群可以单独覆盖这个默认值</td></tr>
+  <tr><td>记录未匹配域名的查询</td><td>有人查询了一个系统里根本没有的域名时，要不要也记一笔（用来发现"有人在扫我的DNS"这类情况）</td></tr>
+  <tr><td>仅记录未匹配到记录的查询</td><td>域名存在，但查的记录类型/名称没配置时，是否单独记录（用来发现该配的记录没配全）</td></tr>
+</table>
+</div>
+
+<footer>
+  文档基于 EdgeAdmin 智能DNS模块当前实现（2026-07-02）整理，部分字段/功能标注了与商业版的差异或待办事项。
+</footer>
+
+</body>
+</html>

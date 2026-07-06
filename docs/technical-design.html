@@ -219,7 +219,6 @@
     <a href="#handler">DNS QueryHandler</a>
     <a href="#routing">流量分流</a>
     <a href="#api">HTTP API</a>
-    <a href="#pg">PostgreSQL 数据模型</a>
     <a href="#sync">多实例同步</a>
     <a href="#axfr">AXFR Zone Transfer</a>
 
@@ -247,8 +246,9 @@
     <p class="subtitle">
       基于 Go + miekg/dns 的高性能权威 DNS 服务，支持 HTTP 热更新 API 与流量分流
       <span class="badge badge-go">Go 1.25</span>
-      <span class="badge badge-pg">PostgreSQL</span>
+      <span class="badge badge-go">edgeDNSAPI</span>
       <span class="badge badge-red">Nacos</span>
+      <span class="badge badge-go">ip2region</span>
     </p>
 
     <!-- ── 1. 背景 ── -->
@@ -312,13 +312,12 @@
                    ┌────────────┴──────────┐
                    │                       │
                    ▼                       ▼
-             PostgreSQL                 Nacos
-          （DNS 记录持久化）       （分流权重，ListenConfig 推送）
-                   ▲
-                   │ 写入 DataID 权重
-           ┌───────┴────────┐
-           │   采样系统      │   ← 独立服务，探测后端健康/延迟
-           └────────────────┘</pre></div>
+           GoEdge EdgeAPI               Nacos
+          （edgeDNSAPI 推送/轮询）  （分流权重，ListenConfig 推送）
+                   │
+                   │  变更推送 + 20s 轮询兜底
+                   ▼
+           ZoneStore（纯内存）</pre></div>
 
       <h3>单实例内部结构</h3>
       <div class="arch-box"><pre>
@@ -332,12 +331,11 @@ dns-edge 进程
 │
 ├── HTTP API Server (:8080)
 │     └── RecordHandler
-│           ├── 写 PostgreSQL（先写，失败则 abort）
-│           └── 写 ZoneStore（后写内存）
+│           └── 写 ZoneStore（纯内存，立即生效）
 │
-└── SyncScheduler（后台 goroutine）
-      ├── 定时任务：每 30s 从 PG 增量拉取变更
-      └── 概率任务：DNS 查询路径上 1% 概率触发同步（Token Bucket 限速）</pre></div>
+└── SyncAgent（后台 goroutine）
+      ├── 推送接收：GoEdge edgeDNSAPI 推送变更 → 直接写 ZoneStore
+      └── 轮询兜底：每 20s 检查 /healthz zoneCount，为 0 时触发全量拉取</pre></div>
     </section>
 
     <!-- ── 3. ZoneStore ── -->
@@ -358,11 +356,13 @@ type Zone struct {
 }
 
 type Record struct {
+    ID      int64
     Name    string
     Type    uint16
     TTL     uint32
     Value   string
-    Weight  int   // 0 表示不参与分流
+    Weight  int      // 0 表示不参与分流
+    RouteTags string // 地理路由标签，如 "province=上海;isp=电信"
 }</code></pre>
 
       <h3>并发策略</h3>
@@ -370,7 +370,7 @@ type Record struct {
         <tr><th>操作</th><th>锁策略</th><th>说明</th></tr>
         <tr><td>DNS 查询（读）</td><td><code>RLock()</code></td><td>允许并发读，零竞争</td></tr>
         <tr><td>热更新 API（写）</td><td><code>Lock()</code></td><td>独占写，低频操作</td></tr>
-        <tr><td>PG 同步（写）</td><td><code>Lock()</code></td><td>每 30s 一次，影响极小</td></tr>
+        <tr><td>edgeDNSAPI 同步（写）</td><td><code>Lock()</code></td><td>推送/轮询触发，低频操作</td></tr>
       </table>
 
       <div class="callout">
@@ -427,11 +427,6 @@ s.snapshot.Store(next)</code></pre>
         m.Answer = append(m.Answer, rr)
     }
     w.WriteMsg(m)
-
-    // 4. 概率触发 PG 同步
-    if rand.Float64() &lt; h.syncProb {
-        go h.syncer.TriggerSync()
-    }
 }</code></pre>
 
       <h3>支持的记录类型</h3>
@@ -453,7 +448,25 @@ s.snapshot.Store(next)</code></pre>
       <h2>5. 流量分流</h2>
 
       <h3>权重来源优先级</h3>
-      <pre><code>Nacos 动态权重  &gt;  PG 静态权重  &gt;  均等分配（fallback）</code></pre>
+      <pre><code>Nacos 动态权重  &gt;  Record.Weight（edgeapi 负载权重）  &gt;  均等分配（fallback）</code></pre>
+
+      <h3>负载动态权重（edgeapi 侧计算）</h3>
+      <p>
+        edgeapi 在每次推送 DNS Record 时，读取节点最近 1 分钟的系统负载（<code>NodeValueItemLoad</code>），
+        按反比公式计算权重后写入 <code>Record.Weight</code>，随 DNS Task 推送给 dns-edge：
+      </p>
+      <pre><code>weight = min(100, max(1, floor(100 / load1m)))
+
+load1m = 0（或无数据）→ weight = 100（满权重）
+load1m = 1.0           → weight = 100
+load1m = 2.0           → weight = 50
+load1m = 5.0           → weight = 20
+load1m = 10.0          → weight = 10
+
+无 NodeValue 数据时 weight = 0，退化为均等分配。</code></pre>
+      <div class="callout ok">
+        权重计算集中在 edgeapi，dns-edge 保持无状态——只执行加权随机，不感知节点负载。权重随 DNS Task 刷新（间隔 ≤ 20s）。
+      </div>
 
       <h3>Nacos 权重格式</h3>
       <pre><code>DataID: dns_weights:{fqdn}:{type}         // 例：dns_weights:api.example.com.:A
@@ -461,26 +474,31 @@ Group:  DEFAULT_GROUP（可按环境配置）
 Value:  {"1.2.3.4": 70, "5.6.7.8": 30}
 
 启动时 getConfig 全量拉取；ListenConfig 注册回调，Nacos 推送变更后毫秒级生效。
-Nacos 不可用时自动降级为 PG 静态权重，PG 也无权重则均等分配。</code></pre>
+Nacos 不可用时自动降级为 Record.Weight 负载权重，均为 0 时均等分配。</code></pre>
 
       <h3>加权随机算法</h3>
-      <pre><code>func weightedRandom(records []*Record) *Record {
+      <pre><code>func weightedRandom(records []*Record, weights map[string]int) *Record {
     total := 0
     for _, r := range records {
-        total += r.Weight
+        w := weights[r.Value]
+        if w &lt;= 0 { w = r.Weight }
+        if w &lt;= 0 { w = 1 }
+        total += w
     }
     n := rand.Intn(total)
     for _, r := range records {
-        n -= r.Weight
-        if n &lt; 0 {
-            return r
-        }
+        w := weights[r.Value]
+        if w &lt;= 0 { w = r.Weight }
+        if w &lt;= 0 { w = 1 }
+        n -= w
+        if n &lt; 0 { return r }
     }
     return records[len(records)-1]
 }</code></pre>
 
       <div class="callout ok">
-        采样系统与 DNS 服务完全解耦。DNS 层通过 Nacos ListenConfig 回调感知权重变更，采样系统随时可以独立上线/更新算法，不影响 DNS 服务。
+        采样系统（Nacos）与 DNS 服务完全解耦。DNS 层通过 Nacos ListenConfig 回调感知权重变更；
+        无 Nacos 时 edgeapi 负载权重自动兜底，两级降级零停机。
       </div>
     </section>
 
@@ -492,9 +510,7 @@ Nacos 不可用时自动降级为 PG 静态权重，PG 也无权重则均等分�
 
       <h3>写操作流程</h3>
       <div class="arch-box"><pre>
-请求 → 参数校验 → 写 PostgreSQL → 更新内存 ZoneStore → 响应 200
-                       │
-                  失败时返回 500，不更新内存（以 PG 为准）</pre></div>
+请求 → 参数校验 → 写 ZoneStore（纯内存，立即生效）→ 响应 200</pre></div>
 
       <h3>接口列表</h3>
       <table>
@@ -531,80 +547,45 @@ Nacos 不可用时自动降级为 PG 静态权重，PG 也无权重则均等分�
 }</code></pre>
     </section>
 
-    <!-- ── 7. PG ── -->
-    <section id="pg">
-      <h2>7. PostgreSQL 数据模型</h2>
-
-      <pre><code>-- 域名表
-CREATE TABLE domains (
-    id         BIGSERIAL PRIMARY KEY,
-    name       TEXT NOT NULL UNIQUE,    -- FQDN，带尾点，如 example.com.
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    deleted_at TIMESTAMPTZ             -- 软删除
-);
-
--- 记录表
-CREATE TABLE records (
-    id         BIGSERIAL PRIMARY KEY,
-    domain_id  BIGINT NOT NULL REFERENCES domains(id),
-    name       TEXT NOT NULL,           -- FQDN
-    type       TEXT NOT NULL,           -- A / AAAA / CNAME / MX ...
-    ttl        INTEGER NOT NULL DEFAULT 300,
-    value      TEXT NOT NULL,
-    weight     INTEGER NOT NULL DEFAULT 100,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    deleted_at TIMESTAMPTZ             -- 软删除
-);
-
-CREATE INDEX idx_records_domain_id  ON records(domain_id);
-CREATE INDEX idx_records_updated_at ON records(updated_at);</code></pre>
-
-      <div class="callout warn">
-        删除操作使用软删除（设置 <code>deleted_at</code>），不能物理删除。否则增量拉取时无法感知已删除的记录，导致其他实例内存中残留。
-      </div>
-
-      <h3>增量同步查询</h3>
-      <pre><code>SELECT r.*, d.name AS domain_name
-FROM records r
-JOIN domains d ON r.domain_id = d.id
-WHERE r.updated_at > $1
-   OR d.updated_at > $1
-ORDER BY r.updated_at ASC;</code></pre>
-    </section>
-
-    <!-- ── 8. 多实例同步 ── -->
+    <!-- ── 7. 多实例同步 ── -->
     <section id="sync">
-      <h2>8. 多实例同步</h2>
+      <h2>7. 多实例同步</h2>
 
-      <h3>定时同步（30s 间隔）</h3>
-      <pre><code>goroutine 启动 → 记录 last_sync_at
+      <p>dns-edge 节点不直连任何数据库，所有记录通过 GoEdge EdgeAPI 同步到纯内存 ZoneStore。</p>
+
+      <h3>推送路径（低延迟）</h3>
+      <pre><code>GoEdge EdgeAPI
+  │  变更时主动调用 dns-edge edgeDNSAPI 接口
+  ▼
+dns-edge /NSRecordService/UpdateNSRecords（gRPC-HTTP）
+  │  解析记录 → 写 ZoneStore
+  ▼
+DNS 查询立即生效（内存直读）</code></pre>
+
+      <h3>轮询兜底（20s）</h3>
+      <pre><code>goroutine 启动
 循环：
-  sleep(30s)
-  SELECT * FROM records WHERE updated_at > last_sync_at
-  批量更新内存 ZoneStore
-  更新 last_sync_at</code></pre>
-
-      <h3>概率触发同步（1% 概率）</h3>
-      <p>在 <code>ServeDNS</code> 路径末尾，以 1% 概率异步触发一次增量同步。配合 Token Bucket 速率限制，防止 QPS 高峰期打爆 PG。</p>
+  sleep(20s)
+  GET /healthz → {"status":"ok","zoneCount":N}
+  if zoneCount == 0:
+      触发 DNSTaskTypeClusterChange（全量拉取）
+      doCluster 推送 A + CNAME 记录到 ZoneStore</code></pre>
 
       <h3>一致性窗口</h3>
       <table>
         <tr><th>场景</th><th>最大不一致窗口</th></tr>
-        <tr><td>API 写入本实例</td><td>0ms（直接更新内存）</td></tr>
-        <tr><td>其他实例定时同步</td><td>≤ 30s</td></tr>
-        <tr><td>其他实例概率触发</td><td>≤ 几秒（高 QPS 下）</td></tr>
+        <tr><td>edgeDNSAPI 推送路径</td><td>&lt; 1s</td></tr>
+        <tr><td>轮询兜底（节点重启/空载）</td><td>≤ 20s</td></tr>
       </table>
 
       <div class="callout ok">
-        最终一致性模型与 DNS TTL 机制天然兼容——下游 resolver 本身会缓存记录到 TTL 过期，30s 的同步窗口在 DNS 语义上完全可接受。
+        最终一致性模型与 DNS TTL 机制天然兼容——下游 resolver 本身会缓存记录到 TTL 过期，20s 的轮询兜底窗口在 DNS 语义上完全可接受。
       </div>
     </section>
 
-    <!-- ── 9. AXFR ── -->
+    <!-- ── 8. AXFR ── -->
     <section id="axfr">
-      <h2>9. AXFR Zone Transfer</h2>
+      <h2>8. AXFR Zone Transfer</h2>
 
       <p>多实例或主从部署时，slave 节点可通过 AXFR 协议从 master 拉取完整 Zone 数据。<code>miekg/dns</code> 原生支持 AXFR，实现成本低。</p>
 
@@ -615,9 +596,9 @@ ORDER BY r.updated_at ASC;</code></pre>
       </ul>
     </section>
 
-    <!-- ── 8. 设计原则 ── -->
+    <!-- ── 9. 设计原则 ── -->
     <section id="principles">
-      <h2>8. 设计原则</h2>
+      <h2>9. 设计原则</h2>
 
       <h3>模块间只依赖接口</h3>
       <p>所有跨模块调用通过 Go interface 而非具体类型传递。切换底层实现（如 RWMutex → COW）只需改启动时的依赖注入，调用方代码零修改。</p>
@@ -634,16 +615,10 @@ type ZoneStore interface {
 
 // WeightProvider — 分流权重来源
 // NacosWeightProvider    → Nacos ListenConfig 推送，毫秒级感知变更（主）
-// StaticWeightProvider   → 从 ZoneStore 读静态权重（PG 持久化，降级用）
+// StaticWeightProvider   → 从 ZoneStore 读内存静态权重（降级用）
 // CompositeWeightProvider → Nacos 优先，Nacos 不可用时自动降级静态
 type WeightProvider interface {
-    GetWeights(fqdn string, qtype uint16) map[string]int
-}
-
-// Syncer — PG 增量同步，解耦同步策略与存储实现
-type Syncer interface {
-    TriggerSync() error
-    Start(ctx context.Context)
+    GetWeights(fqdn string, qtype uint16, clientIP net.IP) map[string]int
 }</code></pre>
 
       <h4>依赖方向</h4>
@@ -651,8 +626,7 @@ type Syncer interface {
 cmd/dns-edge (main)
     │  注入具体实现
     ├── dns.Handler      依赖 ZoneStore + WeightProvider
-    ├── api.Handler      依赖 ZoneStore + pg.Store
-    └── sync.Scheduler   依赖 ZoneStore + pg.Store
+    └── api.Handler      依赖 ZoneStore
 
 各模块不 import 兄弟模块的包，只 import 公共 interface 包。
 切换实现 = 改 main 里的注入，业务代码零改动。</pre></div>
@@ -672,11 +646,10 @@ cmd/dns-edge (main)
     edns0    true       # 启用 EDNS0，UDP 上限 4096B
 
     api {
-        listen :8080
-    }
-
-    postgres {
-        dsn  postgres://user:pass@host:5432/db?sslmode=require
+        listen                    :8080
+        edgedns_access_key_id     <your-key-id>
+        edgedns_access_key_secret <your-key-secret>
+        goedge_secret             <your-goedge-secret>
     }
 
     nacos {
@@ -686,10 +659,8 @@ cmd/dns-edge (main)
         data_id_prefix dns_weights: # DataID 格式：dns_weights:{fqdn}:{type}
     }
 
-    sync {
-        interval  30s
-        prob      0.01
-        ratelimit 100       # 概率触发最大 QPS
+    geo {
+        xdb  /etc/dns-edge/ip2region.xdb
     }
 }</code></pre>
       <div class="callout">
@@ -697,9 +668,9 @@ cmd/dns-edge (main)
       </div>
     </section>
 
-    <!-- ── 9. 部署 ── -->
+    <!-- ── 10. 部署 ── -->
     <section id="deploy-single">
-      <h2>9. 部署方案</h2>
+      <h2>10. 部署方案</h2>
 
       <h3>单机部署</h3>
       <div class="arch-box"><pre>
@@ -711,7 +682,7 @@ cmd/dns-edge (main)
               │
           dns-edge (:5300, :8080)
               │
-      PostgreSQL + Nacos（本机或远端）</pre></div>
+      GoEdge EdgeAPI + Nacos（本机或远端）</pre></div>
     </section>
 
     <section id="deploy-multi">
@@ -723,11 +694,11 @@ cmd/dns-edge (main)
                \          │       /
                 \──────────┼──────/
                            │
-                     PostgreSQL（主从或云托管）
+                     GoEdge EdgeAPI（中心推送 + 20s 轮询兜底）
                            │
                          Nacos（集群，已有基础设施）</pre></div>
 
-      <p>实例间无需互相通信，均独立读 PG / Nacos，通过定时同步保持最终一致。</p>
+      <p>实例间无需互相通信，均从 EdgeAPI 拉取记录，通过推送 + 轮询保持最终一致。</p>
     </section>
 
     <section id="docker">
@@ -748,16 +719,16 @@ ENTRYPOINT ["/dns-edge"]</code></pre>
 
     <section id="config">
       <h3>配置项</h3>
-      <pre><code># config.yaml
+      <pre><code># config.yaml（等价于 Corefile 各块）
 dns:
   listen: ":5300"
   tcp: true
 
 api:
   listen: ":8080"
-
-pg:
-  dsn: "postgres://user:pass@host:5432/dnsdb?sslmode=require"
+  edgedns_access_key_id:     "<your-key-id>"
+  edgedns_access_key_secret: "<your-key-secret>"
+  goedge_secret:             "<your-goedge-secret>"
 
 nacos:
   addr: "nacos:8848"
@@ -765,10 +736,8 @@ nacos:
   group: "DEFAULT_GROUP"
   data_id_prefix: "dns_weights:"   # DataID = prefix + fqdn + ":" + type
 
-sync:
-  interval: "30s"
-  prob: 0.01
-  rate_limit: 100           # 概率触发最大 QPS</code></pre>
+geo:
+  xdb: "/etc/dns-edge/ip2region.xdb"</code></pre>
     </section>
 
     <!-- ── 11. 性能 ── -->
@@ -785,7 +754,7 @@ sync:
         <div class="card">
           <div class="label">热更新延迟</div>
           <div class="value">&lt; 5ms</div>
-          <div class="sub">PG 写入 + 内存更新</div>
+          <div class="sub">内存直接更新</div>
         </div>
         <div class="card">
           <div class="label">同实例一致延迟</div>
@@ -871,7 +840,7 @@ Worker 数量通过配置项控制，默认 runtime.NumCPU()</pre></div>
         <tr><th>库</th><th>版本</th><th>用途</th></tr>
         <tr><td><code>github.com/miekg/dns</code></td><td>v1.1.x</td><td>DNS 协议实现</td></tr>
         <tr><td><code>github.com/gin-gonic/gin</code></td><td>v1.10.x</td><td>HTTP API</td></tr>
-        <tr><td><code>github.com/jackc/pgx/v5</code></td><td>v5.x</td><td>PostgreSQL 驱动</td></tr>
+        <tr><td><code>lionsoul2014/ip2region</code></td><td>v2.x</td><td>ip2region xdb 地理路由</td></tr>
         <tr><td><code>github.com/nacos-group/nacos-sdk-go/v2</code></td><td>v2.x</td><td>Nacos 配置中心客户端</td></tr>
         <tr><td><code>github.com/prometheus/client_golang</code></td><td>v1.12.x</td><td>Prometheus 指标</td></tr>
         <tr><td><code>go.uber.org/zap</code></td><td>v1.x</td><td>结构化日志</td></tr>
@@ -893,7 +862,7 @@ Worker 数量通过配置项控制，默认 runtime.NumCPU()</pre></div>
       <h3>同步指标</h3>
       <table>
         <tr><th>指标名</th><th>类型</th><th>标签</th><th>说明</th></tr>
-        <tr><td><code>dns_sync_total</code></td><td>Counter</td><td><code>result</code> (success/error)</td><td>增量 PG 同步次数</td></tr>
+        <tr><td><code>dns_sync_total</code></td><td>Counter</td><td><code>result</code> (success/error)</td><td>edgeDNSAPI 同步次数</td></tr>
         <tr><td><code>dns_sync_duration_seconds</code></td><td>Histogram</td><td>—</td><td>成功同步耗时分布</td></tr>
         <tr><td><code>dns_sync_last_success_timestamp_seconds</code></td><td>Gauge</td><td>—</td><td>最后一次成功同步的 Unix 时间戳（0 = 从未同步成功）</td></tr>
       </table>

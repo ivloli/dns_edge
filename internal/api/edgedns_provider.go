@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/http"
+	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -195,6 +196,9 @@ func (s *Server) edgeDNSListDomains(c *gin.Context) {
 			IsOn: true,
 		})
 	}
+	// Snapshot() iterates a map, so ordering is otherwise nondeterministic —
+	// sort for stable pagination across calls.
+	sort.Slice(zones, func(i, j int) bool { return zones[i].Name < zones[j].Name })
 
 	// apply offset/size pagination
 	if req.Offset >= len(zones) {
@@ -331,6 +335,7 @@ func (s *Server) edgeDNSCreateRecord(c *gin.Context) {
 		Value        string   `json:"value"`
 		TTL          uint32   `json:"ttl"`
 		NSRouteCodes []string `json:"nsRouteCodes"`
+		Weight       int      `json:"weight"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusOK, edgeDNSErrResp(400, err.Error()))
@@ -343,7 +348,7 @@ func (s *Server) edgeDNSCreateRecord(c *gin.Context) {
 		return
 	}
 
-	rec, err := nsToRecord(req.Name, apex, req.Type, req.Value, req.TTL, req.NSRouteCodes)
+	rec, err := nsToRecord(req.Name, apex, req.Type, req.Value, req.TTL, req.NSRouteCodes, req.Weight)
 	if err != nil {
 		c.JSON(http.StatusOK, edgeDNSErrResp(400, err.Error()))
 		return
@@ -366,6 +371,7 @@ func (s *Server) edgeDNSUpdateRecord(c *gin.Context) {
 		TTL          uint32   `json:"ttl"`
 		NSRouteCodes []string `json:"nsRouteCodes"`
 		IsOn         bool     `json:"isOn"`
+		Weight       int      `json:"weight"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.NSRecordID == 0 {
 		c.JSON(http.StatusOK, edgeDNSErrResp(400, "nsRecordId required"))
@@ -378,7 +384,7 @@ func (s *Server) edgeDNSUpdateRecord(c *gin.Context) {
 		return
 	}
 
-	rec, err := nsToRecord(req.Name, apex, req.Type, req.Value, req.TTL, req.NSRouteCodes)
+	rec, err := nsToRecord(req.Name, apex, req.Type, req.Value, req.TTL, req.NSRouteCodes, req.Weight)
 	if err != nil {
 		c.JSON(http.StatusOK, edgeDNSErrResp(400, err.Error()))
 		return
@@ -462,7 +468,9 @@ func (s *Server) findApexForRecord(recordID int64) (string, error) {
 	return "", fmt.Errorf("record %d not found", recordID)
 }
 
-// listRecordsInZone returns all records in a zone as a flat slice.
+// listRecordsInZone returns all records in a zone as a flat slice, sorted by
+// (name, id) for stable pagination — zone.Records is a map keyed by
+// (name, qtype), so unsorted iteration order is nondeterministic across calls.
 func (s *Server) listRecordsInZone(apex string) []*iface.Record {
 	snap := s.store.Snapshot()
 	zone, ok := snap[apex]
@@ -473,6 +481,12 @@ func (s *Server) listRecordsInZone(apex string) []*iface.Record {
 	for _, recs := range zone.Records {
 		out = append(out, recs...)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out
 }
 
@@ -500,7 +514,7 @@ func (s *Server) queryByNameType(domainID int64, name, recType string) ([]*iface
 // apex is the zone FQDN (e.g. "example.com."); name may be a short label
 // ("www"), a relative name ("www.sub"), or already a FQDN ("www.example.com.").
 // If name does not already end with apex, apex is appended.
-func nsToRecord(name, apex, recType, value string, ttl uint32, nsRouteCodes []string) (*iface.Record, error) {
+func nsToRecord(name, apex, recType, value string, ttl uint32, nsRouteCodes []string, weight int) (*iface.Record, error) {
 	qtype, ok := mdns.StringToType[strings.ToUpper(recType)]
 	if !ok {
 		return nil, fmt.Errorf("unknown record type %q", recType)
@@ -516,6 +530,7 @@ func nsToRecord(name, apex, recType, value string, ttl uint32, nsRouteCodes []st
 		Type:      qtype,
 		TTL:       ttl,
 		Value:     value,
+		Weight:    weight,
 		RouteTags: nsRouteCodesToTags(nsRouteCodes),
 		RR:        rr,
 	}, nil
@@ -582,6 +597,8 @@ func toNSRecordObj(r *iface.Record, apex string) nsRecordObj {
 		// Fallback: just strip trailing dot.
 		shortName = strings.TrimSuffix(shortName, ".")
 	}
+	// Always strip any trailing dot left over (e.g. "*." → "*").
+	shortName = strings.TrimSuffix(shortName, ".")
 	return nsRecordObj{
 		Id:       r.ID,
 		Name:     shortName,

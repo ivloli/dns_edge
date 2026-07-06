@@ -271,7 +271,7 @@ GoEdge 侧：Provider 类型选 `edgeDNSAPI`，填写 `host`、`accessKeyId`、`
 | nsRouteCodes ↔ route_tags 双向转换 | ✅ 已完成 |
 | 配置层 `edgedns_access_key_*` | ✅ 已完成 |
 | 单元测试（22 个用例） | ✅ 已完成 |
-| 与 GoEdge 联调 | ⬜ 待做 |
+| 与 GoEdge 联调（edgeDNSAPI 全链路） | ✅ 已完成 |
 
 ---
 
@@ -355,7 +355,4 @@ dns-edge（Phase 14 补全 edgeDNSAPI 服务端）
 
 ## 8. 待确认事项
 
-1. **Phase 14 优先级**：先做 dns-edge 的 edgeDNSAPI 服务端（P14），还是先完成 customHTTP 联调（P5）？
-2. **路由线路 code 格式**：`province:上海` / `isp:电信` / `country:中国` 这个格式是否与 ECS 地理路由（Phase 13）的 `route_tags` 格式对齐，还是需要适配层？
-3. **edgeapi 存储**：GoEdge 本身就依赖 MySQL，edgeapi MySQL 即为唯一管理面存储，无需迁移 PG。edgeapi 只做管理面，写操作通过 edgeDNSAPI 下发到 dns-edge，dns-edge 存内存，节点间通过推送+轮询同步。✅ 已确认
-4. **EdgeAdmin 前端**：是复用现有 GoEdge 商业版前端界面的 HTML/JS（如果有），还是重新开发？
+1. **EdgeAdmin 前端**：是复用现有 GoEdge 商业版前端界面的 HTML/JS（如果有），还是重新开发？

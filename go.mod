@@ -3,6 +3,7 @@ module dns-edge
 go 1.25.0
 
 require (
+	github.com/TeaOSLab/EdgeCommon v0.0.0-20260629092346-e89d80192045
 	github.com/gin-gonic/gin v1.12.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/lionsoul2014/ip2region/binding/golang v0.0.0-20260623020923-1068bf05a315
@@ -11,6 +12,7 @@ require (
 	github.com/prometheus/client_golang v1.12.2
 	github.com/stretchr/testify v1.11.1
 	go.uber.org/zap v1.27.0
+	google.golang.org/grpc v1.62.0
 )
 
 require (
@@ -33,10 +35,12 @@ require (
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.30.1 // indirect
+	github.com/go-sql-driver/mysql v1.5.0 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/golang/mock v1.6.0 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
+	github.com/iwind/TeaGo v0.0.0-20230623080147-cd1e53b4915f // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
@@ -70,10 +74,12 @@ require (
 	golang.org/x/text v0.34.0 // indirect
 	golang.org/x/time v0.1.0 // indirect
 	golang.org/x/tools v0.41.0 // indirect
-	google.golang.org/genproto v0.0.0-20230410155749-daa745c078e1 // indirect
-	google.golang.org/grpc v1.56.3 // indirect
+	google.golang.org/genproto v0.0.0-20240123012728-ef4313101c80 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20240228224816-df926f6c8641 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 	gopkg.in/ini.v1 v1.66.2 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/TeaOSLab/EdgeCommon => /home/ivloli/Git_repo/EdgeCommon

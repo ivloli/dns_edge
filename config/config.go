@@ -10,11 +10,12 @@ type Config struct {
 	TCP     bool   // also start a TCP listener
 	EDNS0   bool   // advertise EDNS0 in responses (Phase 6)
 
-	API   APIConfig
-	PG    PGConfig
-	Nacos NacosConfig
-	Sync  SyncConfig
-	Geo   GeoConfig
+	API       APIConfig
+	PG        PGConfig
+	Nacos     NacosConfig
+	Sync      SyncConfig
+	Geo       GeoConfig
+	EdgeAgent EdgeAgentConfig
 }
 
 // GeoConfig holds settings for ip2region-based geo-routing.
@@ -61,6 +62,19 @@ type SyncConfig struct {
 	Interval  time.Duration // timer-based sync interval; default 30s
 	Prob      float64       // per-query probabilistic sync probability; default 0.01
 	RateLimit int           // max probabilistic syncs per second (Token Bucket); default 100
+}
+
+// EdgeAgentConfig holds settings for the edgeapi gRPC agent (NS task consumer).
+type EdgeAgentConfig struct {
+	// Endpoint is the edgeapi gRPC address, e.g. "127.0.0.1:8031".
+	// Empty = agent disabled.
+	Endpoint string
+
+	// UniqueID is the NSNode.UniqueId from edgeapi's DB.
+	UniqueID string
+
+	// Secret is the NSNode.Secret from edgeapi's DB.
+	Secret string
 }
 
 // Defaults returns a Config with safe production defaults.

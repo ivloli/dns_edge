@@ -100,8 +100,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.httpSrv.Handler.ServeHTTP(w, r)
 }
 
-// healthz returns 200 {"status":"ok"} unconditionally.
+// healthz returns 200 {"status":"ok","zoneCount":<n>}.
 // Suitable for liveness probes; a non-200 only occurs if the process is dead.
 func (s *Server) healthz(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "zoneCount": s.store.ZoneCount()})
 }

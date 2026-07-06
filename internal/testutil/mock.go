@@ -25,6 +25,7 @@ type MockZoneStore struct {
 	DropRecordFn func(apex string, id int64) error
 	NameExistsFn func(name string) bool
 	FindZoneFn   func(name string) *iface.Zone
+	ZoneCountFn  func() int
 }
 
 var _ iface.ZoneStore = (*MockZoneStore)(nil)
@@ -76,6 +77,12 @@ func (m *MockZoneStore) FindZone(name string) *iface.Zone {
 		return m.FindZoneFn(name)
 	}
 	return nil
+}
+func (m *MockZoneStore) ZoneCount() int {
+	if m.ZoneCountFn != nil {
+		return m.ZoneCountFn()
+	}
+	return 0
 }
 
 // ── MockWeightProvider ────────────────────────────────────────────────────────

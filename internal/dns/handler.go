@@ -4,6 +4,7 @@
 package dns
 
 import (
+	"fmt"
 	"math/rand"
 	"net"
 	"strings"
@@ -152,6 +153,31 @@ func (h *Handler) handleQuery(m *mdns.Msg, r *mdns.Msg, q mdns.Question, clientI
 				if len(targeted) > 0 {
 					h.addAnswers(m, targeted, target, q.Qtype, clientIP)
 				}
+			}
+			return
+		}
+	}
+
+	// Wildcard lookup: strip leftmost label and try *.parent for each ancestor.
+	// Handles both direct match (wildcard A) and wildcard CNAME chasing.
+	if wRecords, wName := h.wildcardLookup(q.Name, q.Qtype); len(wRecords) > 0 {
+		h.addAnswers(m, wRecords, wName, q.Qtype, clientIP)
+		return
+	}
+	if q.Qtype != mdns.TypeCNAME {
+		if wCnames, _ := h.wildcardLookup(q.Name, mdns.TypeCNAME); len(wCnames) > 0 {
+			cn := wCnames[0]
+			// Synthesize a CNAME RR with the queried name as owner.
+			synth, _ := mdns.NewRR(fmt.Sprintf("%s %d IN CNAME %s", q.Name, cn.TTL, cn.Value))
+			if synth != nil {
+				m.Answer = append(m.Answer, synth)
+			}
+			target := cn.Value
+			if !strings.HasSuffix(target, ".") {
+				target += "."
+			}
+			if targeted := h.store.Lookup(target, q.Qtype); len(targeted) > 0 {
+				h.addAnswers(m, targeted, target, q.Qtype, clientIP)
 			}
 			return
 		}
@@ -344,12 +370,17 @@ func (h *Handler) pick(records []*iface.Record, fqdn string, qtype uint16, clien
 
 // filterByGeo narrows records to those best matching the client's geo.
 //
+// Records are grouped by destination IP (r.Value) before tier assignment.
+// This prevents a node with separate province and ISP records from being split
+// across lower tiers: if any record for an IP matches province AND any other
+// record for that IP matches ISP, the entire IP is promoted to provinceISP.
+//
 // Fallback chain (first non-empty tier wins):
-//  1. Records whose RouteTags contain both the client's province and ISP
-//  2. Records whose RouteTags contain the client's province only
-//  3. Records whose RouteTags contain the client's ISP only
-//  4. Records whose RouteTags contain the client's country only
-//  5. Records with empty RouteTags (default route)
+//  1. IPs whose records match both the client's province and ISP
+//  2. IPs whose records match the client's province only
+//  3. IPs whose records match the client's ISP only
+//  4. IPs whose records match the client's country only
+//  5. IPs with empty RouteTags (default route)
 //  6. All records (last resort)
 func (h *Handler) filterByGeo(records []*iface.Record, clientIP net.IP) []*iface.Record {
 	if h.geo == nil || clientIP == nil {
@@ -358,27 +389,55 @@ func (h *Handler) filterByGeo(records []*iface.Record, clientIP net.IP) []*iface
 
 	info := h.geo.Lookup(clientIP)
 
-	var provinceISP, province, isp, country, defaults []*iface.Record
+	type ipEntry struct {
+		recs          []*iface.Record
+		matchProvince bool
+		matchISP      bool
+		matchCountry  bool
+		isDefault     bool
+	}
+
+	index := make(map[string]*ipEntry, len(records))
+	order := make([]string, 0, len(records))
 
 	for _, r := range records {
-		tags := r.RouteTags
-		if tags == "" {
-			defaults = append(defaults, r)
+		e := index[r.Value]
+		if e == nil {
+			e = &ipEntry{}
+			index[r.Value] = e
+			order = append(order, r.Value)
+		}
+		e.recs = append(e.recs, r)
+
+		if r.RouteTags == "" {
+			e.isDefault = true
 			continue
 		}
-		hasProvince := info.Province != "" && containsTag(tags, "province", info.Province)
-		hasISP := info.ISP != "" && containsTag(tags, "isp", info.ISP)
-		hasCountry := info.Country != "" && containsTag(tags, "country", info.Country)
+		if info.Province != "" && containsTag(r.RouteTags, "province", info.Province) {
+			e.matchProvince = true
+		}
+		if info.ISP != "" && containsTag(r.RouteTags, "isp", info.ISP) {
+			e.matchISP = true
+		}
+		if info.Country != "" && containsTag(r.RouteTags, "country", info.Country) {
+			e.matchCountry = true
+		}
+	}
 
+	var provinceISP, province, isp, country, defaults []*iface.Record
+	for _, ip := range order {
+		e := index[ip]
 		switch {
-		case hasProvince && hasISP:
-			provinceISP = append(provinceISP, r)
-		case hasProvince:
-			province = append(province, r)
-		case hasISP:
-			isp = append(isp, r)
-		case hasCountry:
-			country = append(country, r)
+		case e.matchProvince && e.matchISP:
+			provinceISP = append(provinceISP, e.recs...)
+		case e.matchProvince:
+			province = append(province, e.recs...)
+		case e.matchISP:
+			isp = append(isp, e.recs...)
+		case e.matchCountry:
+			country = append(country, e.recs...)
+		case e.isDefault:
+			defaults = append(defaults, e.recs...)
 		}
 	}
 
@@ -401,4 +460,28 @@ func containsTag(routeTags, key, val string) bool {
 		}
 	}
 	return false
+}
+
+// wildcardLookup strips labels from qname one at a time and checks for a
+// wildcard record ("*.<parent>") in the same zone. Returns the matching
+// records and the wildcard owner name used for the lookup.
+func (h *Handler) wildcardLookup(qname string, qtype uint16) ([]*iface.Record, string) {
+	name := qname
+	for {
+		dot := strings.Index(name, ".")
+		if dot < 0 {
+			break
+		}
+		parent := name[dot+1:]
+		if parent == "" {
+			break
+		}
+		wildcard := "*." + parent
+		recs := h.store.Lookup(wildcard, qtype)
+		if len(recs) > 0 {
+			return recs, wildcard
+		}
+		name = parent
+	}
+	return nil, ""
 }

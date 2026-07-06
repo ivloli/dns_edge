@@ -39,7 +39,7 @@ Nacos 启动时如果 DataID 还未发布，会输出 `WARN nacos: GetConfig fai
 curl -s http://localhost:8080/healthz
 ```
 
-**预期**：`{"status":"ok"}`，HTTP 200
+**预期**：`{"status":"ok","zoneCount":N}`，HTTP 200
 
 ---
 
@@ -225,7 +225,7 @@ curl -s http://localhost:8080/metrics | grep -E '^dns_'
 
 | 项目 | 命令 | 预期结果 | 实测 |
 |------|------|----------|------|
-| 进程启动 | `curl /healthz` | `{"status":"ok"}` | ✅ |
+| 进程启动 | `curl /healthz` | `{"status":"ok","zoneCount":N}` | ✅ |
 | A 记录 | `dig www.example.com. A` | `1.2.3.4` | ✅ |
 | 加权分流 | 20 次 dig api | ~14/6（70/30）| ✅ |
 | NXDOMAIN | `dig notexist... A` | `status: NXDOMAIN` | ✅ |

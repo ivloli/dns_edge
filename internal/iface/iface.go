@@ -84,6 +84,9 @@ type ZoneStore interface {
 	// call returns because PutRecord/DropRecord use copy-on-write semantics.
 	// Returns nil when no zone covers name.
 	FindZone(name string) *Zone
+
+	// ZoneCount returns the number of zones currently held in the store. O(1).
+	ZoneCount() int
 }
 
 // RecordStore is the PostgreSQL-backed persistence layer used by the HTTP API.

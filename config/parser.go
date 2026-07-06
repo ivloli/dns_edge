@@ -251,6 +251,14 @@ func (p *parser) parseMain(cfg *Config) error {
 				return err
 			}
 
+		case "edgeagent":
+			if err := p.expect("{"); err != nil {
+				return err
+			}
+			if err := p.parseEdgeAgent(&cfg.EdgeAgent); err != nil {
+				return err
+			}
+
 		default:
 			return fmt.Errorf("line %d: unknown key %q in dns-edge block", key.line, key.text)
 		}
@@ -421,6 +429,42 @@ func (p *parser) parseSync(cfg *SyncConfig) error {
 			cfg.RateLimit = n
 		default:
 			return fmt.Errorf("line %d: unknown key %q in sync block", key.line, key.text)
+		}
+	}
+}
+
+func (p *parser) parseEdgeAgent(cfg *EdgeAgentConfig) error {
+	for {
+		t, ok := p.peek()
+		if !ok {
+			return fmt.Errorf("unexpected EOF inside edgeagent block")
+		}
+		if t.text == "}" {
+			p.next()
+			return nil
+		}
+		key, _ := p.next()
+		switch key.text {
+		case "endpoint":
+			v, err := p.nextVal(key)
+			if err != nil {
+				return err
+			}
+			cfg.Endpoint = v
+		case "unique_id":
+			v, err := p.nextVal(key)
+			if err != nil {
+				return err
+			}
+			cfg.UniqueID = v
+		case "secret":
+			v, err := p.nextVal(key)
+			if err != nil {
+				return err
+			}
+			cfg.Secret = v
+		default:
+			return fmt.Errorf("line %d: unknown key %q in edgeagent block", key.line, key.text)
 		}
 	}
 }

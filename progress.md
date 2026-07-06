@@ -1,108 +1,107 @@
 # 会话日志
 
-## 2026-06-26 — 联调完成
+## 2026-07-03
 
-### 完成的工作
+### edgeagent 重连机制补齐（P10）
 
-1. **重写 `edgedns_provider.go`**：彻底去掉 `s.pg` 依赖，所有 edgeDNSAPI 端点改为操作 `s.store`（ZoneStore）
-   - Zone ID：FNV-1a 64-bit hash of apex FQDN（纯内存，可重复）
-   - Record ID：进程内原子计数器
-   - `FindNSDomainWithName`：zone 不存在时 lazy-create 空 zone
-   - `CreateNSRecord`：分配 ID，调用 `store.PutRecord()`，DNS 立即生效
-   - `UpdateNSRecord`：找到 apex，`store.PutRecord()` 覆盖（ID 匹配）
-   - `DeleteNSRecord`：找到 apex，`store.DropRecord()`
-   - 全部辅助函数（resolveApexByID、findApexForRecord、listRecordsInZone、queryByNameType）
+代码复查发现用户记忆中"已完成"的重连机制实际未做（只有 gRPC channel 默认行为兜底，无 supervise、无心跳恢复），CNAME/记录同步机制本身是对的（通用 RR 解析，无需特殊处理）。
 
-2. **联调验证通过**：
-   ```
-   getAPIAccessToken → code 200, token 获取成功
-   FindNSDomainWithName("test.local") → lazy-create zone，返回 domainId
-   CreateNSRecord(www.test.local A 10.0.0.1) → nsRecordId: 1
-   ListNSRecords → 返回已创建记录
-   dig @127.0.0.1 -p 5300 www.test.local A → 10.0.0.1 ✓
-   ```
+修复 `internal/edgeagent/agent.go`：初始连接失败指数退避重试、gRPC keepalive 加快断线探测、连接状态变化日志、在线状态从"启动时一次"改为随 10s ticker 周期上报（重连后自动恢复在线状态）、`ctx.Done()` 时优雅上报离线。纯边缘节点侧改动，不涉及 edgeapi。
 
-3. **更新规划文档**：task_plan.md / progress.md / findings.md 重写，去掉历史废弃内容
+验证：`go build ./...` / `go vet` / `gofmt -l` 干净；`go test ./...` 唯一失败 `TestEdgeDNS_ListDomains` 经 stash 对比确认是改动前已存在的问题，与本次无关。
 
-### 关键结论
+---
 
-- no-PG 模式完全可用：启动 Corefile.local（仅配置 api.listen + edgedns_access_key），edgeDNSAPI 全部工作
-- GoEdge 不调用 CreateNSDomain，FindNSDomainWithName 需要 lazy-create zone
-- dns-edge 重启后记录丢失是预期行为（GoEdge 会重新推送）
+### 冷启动全量重同步 + edgedns_test.go 大修 + 端到端测试报告
 
-### 下一步
+修 `go test` 时顺带发现 `edgedns_test.go` 近一半测试（12个）在 mock 一个生产代码早就不读的依赖（`no-PG` 迁移后 `edgedns_provider.go` 只读写 ZoneStore），改用真实 `store.RWMutexStore` 重写，过程中顺带修了一个生产 bug：`ListNSDomains`/`ListNSRecords` 分页因 map 遍历非确定性导致结果不稳定（加排序）。
 
-- P1：在 EdgeAdmin 配置 edgeDNSAPI provider，通过 GoEdge UI 触发域名+记录创建，验证 dig
+编译重启本地三个服务后做端到端测试，发现真实问题：dns-edge 重启后 NS 域名全部 REFUSED——根因是 edgeagent 只在收到 `nsDomainChanged`/`nsRecordChanged` 任务时才同步，任务是一次性的，重启后若已消费完就再也不会主动全量拉取（CDN 模式有 edgeapi 侧 zoneCount 自动恢复，NS 模式没有对应机制）。已在 `agent.go` 里加上"连接建立后无条件全量 sync"，验证：真实冷重启（无任何手动 DB 干预）后 zoneCount 从 0 自动恢复到 3，全部域名正确解析。
 
-## 2026-06-26 — 全链路联调 + 自动恢复
+测试过程中用户反馈 EdgeAdmin `/ns/clusters/cluster?clusterId=1` 详情页节点数为空，排查发现是纯前端 bug（`cluster.go` 没传 `countNodes` 字段给模板），跟本次同步改动无关，顺手修了（`edgeadmin` 仓库，不同代码库）。
 
-### 完成的工作
+完整测试报告已写入 `task_plan.md`「测试报告（2026-07-03）」一节，含单测结果、编译重启记录、11 项 NS 功能端到端验证、3 个顺手修复的问题、2 条环境噪音说明（历史脏数据导致的非代码问题）。
 
-1. **EdgeAdmin UI 全链路联调通过**：
-   - EdgeAdmin → DNS 管理 → 新建 edgeDNSAPI provider → 新建域名 `edge-test.local`
-   - 绑定集群 DNS，设置二级域名前缀 `cluster1`
-   - 点「同步」→ edgeapi 调用 `FindNSDomainWithName` lazy-create zone，再 `CreateNSRecord` 推送节点 IP
-   - `dig @127.0.0.1 -p 5300 cluster1.edge-test.local A` → `10.100.0.1` ✓
+---
 
-2. **自动恢复机制（edgeapi 侧）**：
-   - `edgeapi/internal/tasks/dns_task_executor.go` 新增 `resyncEmptyEdgeDNSProviders()`
-   - 每 20s tick 调 `GetDomains()`，若 dns-edge 返回空列表（重启后），立即插 `ClusterNodesChange` task
-   - 实测：dns-edge 重启后 **5 秒内** `dig` 返回正确记录，无需手动同步 ✓
+### NS 仪表盘统计为空导致前端崩溃（用户报告后追加修复）
 
-3. **部署文档重写**：`setup_guide.md` 全量重写，覆盖 MySQL 初始化→编译→配置→EdgeAdmin 绑定→systemd
+用户反馈 `/ns` 仪表盘"近24小时"图表连坐标轴都没了。排查确认不是 CSS 回归，是统计窗口零命中时后端返回 `null`（Go nil slice），前端 `.map()` 无条件调用直接崩溃，把同一批的域名排行图也带崩——任何域名零流量都会触发，是通用 bug 不是本次种子数据过期特有。
 
-4. **文档清理**：task_plan.md / findings.md / progress.md 更新至当前状态
+踩坑：先以为在 edgeapi 侧把切片初始化成非 nil 就够了，编译部署后复测仍是 `null`——gRPC/protobuf repeated 字段序列化不区分空切片和未设置，这个信息过不了 gRPC 边界。真正修复点是 edgeadmin 自己生成 HTTP JSON 的那层（`ns/index.go`）。两个仓库都改了（edgeapi 那处算防御性最佳实践，非关键；edgeadmin 那处才是真正生效的），均已编译重启，curl 复测 `hourlyStats`/`topDomainStats`/`topNodeStats` 从 `null` 变成 `[]`。详见 `findings.md`。
 
-### 关键发现
+---
 
-- dns-edge 无法反向调 edgeapi（gRPC + 身份认证壁垒），自动恢复只能在 edgeapi 侧实现
-- NS 系列服务（NSDomainService 等）走 edgeapi 的 `RestServer`（HTTP），不走 gRPC；dns-edge edgeDNSAPI server 正是这套协议的 server 端
-- 商业版只有 client（`provider_edge_dns_api.go`），server 端由我们实现
+## 2026-07-01
 
-### 当前各组件状态
+### NS 模式端到端联调完成
 
-| 组件 | 状态 |
+**环境修复**：
+- `Tea.Root` 规则导致 edgeapi 读 `/home/ivloli/configs/` 而非 `edgeapi-run/configs/`
+- `/home/ivloli/configs/db.yaml` 改为 `db_edge`，`api.yaml` 改为 db_edge id=1 的凭据（gRPC :8031）
+- 删除废弃的 `edgeapi-run/edge-api-comm` 和 `edge-api-comm.bak`
+
+**代码修复**：
+
+| 修复 | 文件 | 说明 |
+|------|------|------|
+| convertRecordToPB 填充 NsDomain | edgeapi `service_ns_record.go` | agent 侧需要 zone 名展开相对记录名 |
+| applyRecord 记录名展开 | dns-edge `internal/edgeagent/agent.go` | `@`→apex，`name`→`name.zone.`，覆盖所有相对标签 |
+
+**验证结果**：
+
+| 测试 | 结果 |
 |------|------|
-| dns-edge | 运行中（:5300 DNS + :8080 API） |
-| edgeapi | 运行中（:8031 gRPC），含新自动恢复逻辑 |
-| EdgeAdmin | 运行中（:7788） |
+| `dig @127.0.0.1 -p 5300 test.local A` | `10.0.0.1` ✅ |
+| `dig @127.0.0.1 -p 5300 www.test.local A` | `1.2.3.4` ✅ |
+| nsDomainChanged 任务消费 | isDone=1 isOk=1 ✅ |
+| nsRecordChanged 任务消费 | isDone=1 isOk=1 ✅ |
 
-## 2026-06-27 — ECS 地理路由验证 + xdb 自动更新
+**当前运行状态**：
+- edgeapi: pid 624354，`/home/ivloli/edgeapi-run/edge-api`，gRPC :8031，db_edge
+- dns-edge: `./dns-edge-local -config Corefile.local`，DNS :5300，edgeagent → 127.0.0.1:8031
 
-### 完成的工作
+---
 
-1. **修复 geo parseRegion 字段索引**：
-   - 原代码按 5 字段格式（含「区域」）解析，实际 xdb 是 4 字段（`国家|省份|城市|ISP`）
-   - 修正字段索引，Province=parts[1]，ISP=parts[3]
-   - 新增 `normalizeProvince`（去掉「省」「市」）和 `normalizeISP`（去掉「中国」「云」）
-   - 参照 `/home/ivloli/Git_repo/dns/plugin/ecs_normalizer/util.go` 中的规范化逻辑
+## 2026-06-30
 
-2. **parseRegion 兼容多版本 xdb**：
-   - 4 字段（旧版）和 5 字段（新版 v3.x，含 CC 或区域=0）均正确解析
+### NS 模块合并 + gRPC 鉴权修复
 
-3. **ECS 地理路由 5 场景全部验证通过**：
-   ```
-   浙江电信 122.224.0.1 → 3.3.3.3  (province+ISP 精确)  ✓
-   浙江移动 111.0.0.1   → 1.1.1.1  (province 匹配)       ✓
-   广东移动 183.232.0.1 → 2.2.2.2  (province 匹配)       ✓
-   北京联通 123.125.0.1 → 9.9.9.9  (默认)                ✓
-   无 ECS              → 随机      (clientIP=nil)         ✓
-   ```
+将 edgeapi-comm（商业版）NS 代码合并到 edgeapi（feature/ivloli），统一使用 db_edge：
 
-4. **ip2region xdb 自动更新**（`internal/geo/updater.go`）：
-   - 启动时后台检查 GitHub Releases，版本不同则下载新 xdb
-   - 热替换：原子 rename + `Router.swap()`，无需重启
-   - 定时 24h 检查，可配置 interval 和 github_token
-   - 实测：删除版本标记文件 → 重启 → 1 秒内下载并替换 v3.16.0 ✓
+**合并内容**：
+- `internal/db/models/nameservers/*.go`（30 个文件）
+- `internal/rpc/services/service_ns_*.go`（node/cluster/domain/record/route）
+- `internal/nodes/api_node_services.go`（注册 NS gRPC 服务）
+- `internal/db/models/node_task_dao_ext.go`（实现 ExtractNSClusterTask，之前是空 stub）
 
-### 新增文件
+**鉴权修复**：
+1. `ns_node_dao.go CreateNSNode`：补加 `SharedApiTokenDAO.CreateAPIToken(tx, uniqueId, secret, NodeRoleDNS)`
+2. `utils_ext.go ValidateRequest`：switch 补 `UserTypeDNS` case
+3. `service_ns_node.go` 节点侧方法：改用 `ValidateNodeId(ctx, UserTypeDNS)`
 
-- `internal/geo/updater.go` — xdb 自动更新器
+**dns-edge edgeagent 新增**：
+- `internal/edgeagent/agent.go`：gRPC 连接 + AES-256-CFB 鉴权 + 任务轮询 + domain/record 增量同步
+- `Corefile.local`：新增 edgeagent 块，endpoint 127.0.0.1:8031
 
-### 修改文件
+---
 
-- `internal/geo/geo.go` — parseRegion/normalizeProvince/normalizeISP/Router.swap()
-- `config/config.go` — GeoConfig 新增 AutoUpdate/UpdateInterval/GithubToken
-- `config/parser.go` — 解析 geo 块新字段
-- `cmd/dns-edge/main.go` — 接入 Updater
-- `Corefile.local` — 启用 auto_update true, update_interval 24h
+## 2026-06-29
+
+### CDN 功能完善
+
+1. **动态权重**：edgeapi 按节点 load1m 计算 Weight（`min(100, max(1, 100/load1m))`），dns-edge weightedRandom
+2. **通配符 CNAME**：edgeapi doCluster 自动推 `* CNAME cluster1.<domain>`，dns-edge wildcardLookup
+3. **Bug 修复**：toNSRecordObj 尾点残留（`*.fafa.com.` → `*.`）；findClusterDNSChanges 缺少 `*` 保护
+
+---
+
+## 2026-06-27
+
+### CDN 基础功能
+
+1. zoneCount /healthz + O(1) 空检测
+2. ClusterNodesChange → ClusterChange（CNAME 恢复）
+3. filterByGeo IP 聚合
+4. xdb 自动更新（GitHub Releases 热替换）
+5. geo parseRegion 4/5 字段兼容

@@ -229,7 +229,7 @@ dig @<dns-edge-ip> -p 5300 <子域名>.<域名> A +short
 
 # API 健康检查
 curl http://<dns-edge-ip>:8080/healthz
-# → {"status":"ok"}
+# → {"status":"ok","zoneCount":2}
 ```
 
 ---

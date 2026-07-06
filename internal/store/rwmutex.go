@@ -167,6 +167,13 @@ func (s *RWMutexStore) PutRecord(apex string, rec *iface.Record) error {
 	return nil
 }
 
+// ZoneCount returns the number of zones in the store. O(1).
+func (s *RWMutexStore) ZoneCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.zones)
+}
+
 // DropRecord removes the record with the given ID from apex's zone using
 // copy-on-write. No-op when the zone or record is absent from the store.
 func (s *RWMutexStore) DropRecord(apex string, id int64) error {

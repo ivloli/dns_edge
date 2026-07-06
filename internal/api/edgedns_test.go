@@ -2,12 +2,12 @@ package api_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	mdns "github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -15,11 +15,16 @@ import (
 	"dns-edge/config"
 	"dns-edge/internal/api"
 	"dns-edge/internal/iface"
-	"dns-edge/internal/pg"
+	"dns-edge/internal/store"
 	"dns-edge/internal/testutil"
 )
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+//
+// edgeDNSAPI handlers (edgedns_provider.go) read and write iface.ZoneStore
+// exclusively — the "no-PG" migration — so fixtures for these tests live in a
+// real store.RWMutexStore rather than in mockRS (which only backs the
+// separate goedge_provider.go/record.go surface tested by api_test.go).
 
 func newEdgeDNSSrv(rs iface.RecordStore, zs iface.ZoneStore) *api.Server {
 	return api.New(config.APIConfig{
@@ -64,6 +69,40 @@ func edgeDNSCode(t *testing.T, rr *httptest.ResponseRecorder) float64 {
 	var resp map[string]any
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
 	return resp["code"].(float64)
+}
+
+// findDomainID discovers the nsDomainId a real GoEdge client would get for
+// name via FindNSDomainWithName — the id is an internal FNV hash of the
+// apex (see zoneID in edgedns_provider.go), so tests resolve it through the
+// API instead of hardcoding it. Decoded via json.Number/Int64 rather than
+// the default float64, since the FNV hash regularly exceeds 2^53 and a
+// float64 round-trip would silently corrupt it before it's sent back in a
+// follow-up request.
+func findDomainID(t *testing.T, srv *api.Server, token, name string) int64 {
+	t.Helper()
+	rr := authed(t, srv, token, "/NSDomainService/FindNSDomainWithName", map[string]any{"name": name})
+	require.Equal(t, http.StatusOK, rr.Code)
+	dec := json.NewDecoder(rr.Body)
+	dec.UseNumber()
+	var resp map[string]any
+	require.NoError(t, dec.Decode(&resp))
+	data := resp["data"].(map[string]any)
+	domain := data["nsDomain"].(map[string]any)
+	id, err := domain["id"].(json.Number).Int64()
+	require.NoError(t, err)
+	return id
+}
+
+// findStoredRecord looks up the single record stored under (name, qtype) in
+// apex's zone, for asserting on fields (like RouteTags) the wire response
+// doesn't echo back directly.
+func findStoredRecord(t *testing.T, zs iface.ZoneStore, apex, name string, qtype uint16) *iface.Record {
+	t.Helper()
+	zone, ok := zs.Snapshot()[apex]
+	require.True(t, ok, "zone %q not found in store", apex)
+	recs := zone.Records[iface.RecordKey{Name: name, Qtype: qtype}]
+	require.Len(t, recs, 1)
+	return recs[0]
 }
 
 // ── APIAccessTokenService ─────────────────────────────────────────────────────
@@ -112,14 +151,10 @@ func TestEdgeDNS_RequiresToken(t *testing.T) {
 }
 
 func TestEdgeDNS_TokenReuse(t *testing.T) {
-	srv := newEdgeDNSSrv(&mockRS{
-		listZonesFn: func(_ context.Context) ([]iface.ZoneMeta, error) {
-			return nil, nil
-		},
-	}, &testutil.MockZoneStore{})
+	srv := newEdgeDNSSrv(&mockRS{}, &testutil.MockZoneStore{})
 	token := getToken(t, srv)
 	// same token works for multiple requests
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rr := authed(t, srv, token, "/NSDomainService/ListNSDomains", map[string]any{})
 		assert.Equal(t, http.StatusOK, rr.Code)
 		assert.Equal(t, float64(200), edgeDNSCode(t, rr))
@@ -129,15 +164,10 @@ func TestEdgeDNS_TokenReuse(t *testing.T) {
 // ── NSDomainService ───────────────────────────────────────────────────────────
 
 func TestEdgeDNS_ListDomains(t *testing.T) {
-	rs := &mockRS{
-		listZonesFn: func(_ context.Context) ([]iface.ZoneMeta, error) {
-			return []iface.ZoneMeta{
-				{ID: 1, Name: "example.com."},
-				{ID: 2, Name: "foo.org."},
-			}, nil
-		},
-	}
-	srv := newEdgeDNSSrv(rs, &testutil.MockZoneStore{})
+	zs := store.New()
+	require.NoError(t, zs.Update(testutil.MakeZone("example.com.")))
+	require.NoError(t, zs.Update(testutil.MakeZone("foo.org.")))
+	srv := newEdgeDNSSrv(&mockRS{}, zs)
 	token := getToken(t, srv)
 	rr := authed(t, srv, token, "/NSDomainService/ListNSDomains", map[string]any{"offset": 0, "size": 10})
 	assert.Equal(t, http.StatusOK, rr.Code)
@@ -147,21 +177,16 @@ func TestEdgeDNS_ListDomains(t *testing.T) {
 	data := resp["data"].(map[string]any)
 	domains := data["nsDomains"].([]any)
 	require.Len(t, domains, 2)
-	// trailing dot stripped in response
+	// results are sorted by name for stable pagination: example.com before foo.org
 	assert.Equal(t, "example.com", domains[0].(map[string]any)["name"])
 }
 
 func TestEdgeDNS_ListDomains_Pagination(t *testing.T) {
-	rs := &mockRS{
-		listZonesFn: func(_ context.Context) ([]iface.ZoneMeta, error) {
-			return []iface.ZoneMeta{
-				{ID: 1, Name: "a.com."},
-				{ID: 2, Name: "b.com."},
-				{ID: 3, Name: "c.com."},
-			}, nil
-		},
+	zs := store.New()
+	for _, apex := range []string{"a.com.", "b.com.", "c.com."} {
+		require.NoError(t, zs.Update(testutil.MakeZone(apex)))
 	}
-	srv := newEdgeDNSSrv(rs, &testutil.MockZoneStore{})
+	srv := newEdgeDNSSrv(&mockRS{}, zs)
 	token := getToken(t, srv)
 	rr := authed(t, srv, token, "/NSDomainService/ListNSDomains", map[string]any{"offset": 1, "size": 1})
 	var resp map[string]any
@@ -173,13 +198,16 @@ func TestEdgeDNS_ListDomains_Pagination(t *testing.T) {
 }
 
 func TestEdgeDNS_FindDomain_Found(t *testing.T) {
-	rs := &mockRS{
-		getZoneFn: func(_ context.Context, apex string) (iface.ZoneMeta, error) {
-			return iface.ZoneMeta{ID: 5, Name: apex}, nil
-		},
-	}
-	srv := newEdgeDNSSrv(rs, &testutil.MockZoneStore{})
+	zs := store.New()
+	require.NoError(t, zs.Update(testutil.MakeZone("example.com.")))
+	srv := newEdgeDNSSrv(&mockRS{}, zs)
 	token := getToken(t, srv)
+
+	listRR := authed(t, srv, token, "/NSDomainService/ListNSDomains", map[string]any{"offset": 0, "size": 10})
+	var listResp map[string]any
+	require.NoError(t, json.NewDecoder(listRR.Body).Decode(&listResp))
+	wantID := listResp["data"].(map[string]any)["nsDomains"].([]any)[0].(map[string]any)["id"]
+
 	rr := authed(t, srv, token, "/NSDomainService/FindNSDomainWithName", map[string]any{"name": "example.com"})
 	assert.Equal(t, http.StatusOK, rr.Code)
 	var resp map[string]any
@@ -187,50 +215,53 @@ func TestEdgeDNS_FindDomain_Found(t *testing.T) {
 	assert.Equal(t, float64(200), resp["code"])
 	data := resp["data"].(map[string]any)
 	domain := data["nsDomain"].(map[string]any)
-	assert.Equal(t, float64(5), domain["id"])
+	// id is a deterministic hash of the apex, so the same zone must resolve
+	// to the same id whether reached via ListNSDomains or FindNSDomainWithName.
+	assert.Equal(t, wantID, domain["id"])
+	assert.Equal(t, "example.com", domain["name"])
 }
 
-func TestEdgeDNS_FindDomain_NotFound(t *testing.T) {
-	rs := &mockRS{
-		getZoneFn: func(_ context.Context, _ string) (iface.ZoneMeta, error) {
-			return iface.ZoneMeta{}, pg.ErrNotFound
-		},
-	}
-	srv := newEdgeDNSSrv(rs, &testutil.MockZoneStore{})
+func TestEdgeDNS_FindDomain_LazyCreatesZone(t *testing.T) {
+	zs := store.New() // no zones yet
+	srv := newEdgeDNSSrv(&mockRS{}, zs)
 	token := getToken(t, srv)
+
 	rr := authed(t, srv, token, "/NSDomainService/FindNSDomainWithName", map[string]any{"name": "ghost.com"})
 	assert.Equal(t, http.StatusOK, rr.Code)
 	var resp map[string]any
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
 	assert.Equal(t, float64(200), resp["code"])
 	data := resp["data"].(map[string]any)
-	assert.Nil(t, data["nsDomain"])
+	domain := data["nsDomain"].(map[string]any)
+	assert.Equal(t, "ghost.com", domain["name"])
+
+	// GoEdge never calls CreateNSDomain, so dns-edge must lazily create the
+	// zone on first lookup — otherwise GoEdge could never create records for
+	// a domain it just added.
+	_, ok := zs.Snapshot()["ghost.com."]
+	assert.True(t, ok, "zone should have been lazily created in the store")
 }
 
 // ── NSRecordService ───────────────────────────────────────────────────────────
 
 func TestEdgeDNS_ListRecords(t *testing.T) {
-	rs := &mockRS{
-		listZonesFn: func(_ context.Context) ([]iface.ZoneMeta, error) {
-			return []iface.ZoneMeta{{ID: 1, Name: "example.com."}}, nil
-		},
-		listRecordsFn: func(_ context.Context, _ string) ([]*iface.Record, error) {
-			return []*iface.Record{
-				{ID: 10, Name: "www.example.com.", Type: 1, Value: "1.2.3.4", TTL: 300},
-				{ID: 11, Name: "www.example.com.", Type: 1, Value: "5.6.7.8", TTL: 300, RouteTags: "province=上海"},
-			}, nil
-		},
-	}
-	srv := newEdgeDNSSrv(rs, &testutil.MockZoneStore{})
+	zs := store.New()
+	require.NoError(t, zs.Update(testutil.MakeZone("example.com.",
+		&iface.Record{ID: 10, Name: "www.example.com.", Type: mdns.TypeA, Value: "1.2.3.4", TTL: 300},
+		&iface.Record{ID: 11, Name: "www.example.com.", Type: mdns.TypeA, Value: "5.6.7.8", TTL: 300, RouteTags: "province=上海"},
+	)))
+	srv := newEdgeDNSSrv(&mockRS{}, zs)
 	token := getToken(t, srv)
-	rr := authed(t, srv, token, "/NSRecordService/ListNSRecords", map[string]any{"nsDomainId": 1, "offset": 0, "size": 10})
+	domainID := findDomainID(t, srv, token, "example.com")
+
+	rr := authed(t, srv, token, "/NSRecordService/ListNSRecords", map[string]any{"nsDomainId": domainID, "offset": 0, "size": 10})
 	assert.Equal(t, http.StatusOK, rr.Code)
 	var resp map[string]any
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
 	data := resp["data"].(map[string]any)
 	records := data["nsRecords"].([]any)
 	require.Len(t, records, 2)
-	// second record has province route — verify route_tags → nsRoutes conversion
+	// second record (by id) has the province route — verify route_tags -> nsRoutes conversion
 	r1 := records[1].(map[string]any)
 	routes := r1["nsRoutes"].([]any)
 	require.Len(t, routes, 1)
@@ -246,22 +277,15 @@ func TestEdgeDNS_ListRecords_MissingDomainID(t *testing.T) {
 }
 
 func TestEdgeDNS_CreateRecord_DefaultRoute(t *testing.T) {
-	var capturedTags string
-	rs := &mockRS{
-		listZonesFn: func(_ context.Context) ([]iface.ZoneMeta, error) {
-			return []iface.ZoneMeta{{ID: 1, Name: "example.com."}}, nil
-		},
-		createRecordFn: func(_ context.Context, _ int64, rec *iface.Record) (*iface.Record, bool, error) {
-			capturedTags = rec.RouteTags
-			rec.ID = 77
-			return rec, true, nil
-		},
-	}
-	srv := newEdgeDNSSrv(rs, &testutil.MockZoneStore{})
+	zs := store.New()
+	require.NoError(t, zs.Update(testutil.MakeZone("example.com.")))
+	srv := newEdgeDNSSrv(&mockRS{}, zs)
 	token := getToken(t, srv)
+	domainID := findDomainID(t, srv, token, "example.com")
+
 	rr := authed(t, srv, token, "/NSRecordService/CreateNSRecord", map[string]any{
-		"nsDomainId":   1,
-		"name":         "www.example.com",
+		"nsDomainId":   domainID,
+		"name":         "www",
 		"type":         "A",
 		"value":        "1.2.3.4",
 		"ttl":          300,
@@ -269,73 +293,60 @@ func TestEdgeDNS_CreateRecord_DefaultRoute(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, float64(200), edgeDNSCode(t, rr))
-	assert.Equal(t, "", capturedTags) // "default" -> empty route_tags
+
+	rec := findStoredRecord(t, zs, "example.com.", "www.example.com.", mdns.TypeA)
+	assert.Equal(t, "", rec.RouteTags) // "default" -> empty route_tags
 }
 
 func TestEdgeDNS_CreateRecord_ProvinceAndISP(t *testing.T) {
-	var capturedTags string
-	rs := &mockRS{
-		listZonesFn: func(_ context.Context) ([]iface.ZoneMeta, error) {
-			return []iface.ZoneMeta{{ID: 1, Name: "example.com."}}, nil
-		},
-		createRecordFn: func(_ context.Context, _ int64, rec *iface.Record) (*iface.Record, bool, error) {
-			capturedTags = rec.RouteTags
-			rec.ID = 78
-			return rec, true, nil
-		},
-	}
-	srv := newEdgeDNSSrv(rs, &testutil.MockZoneStore{})
+	zs := store.New()
+	require.NoError(t, zs.Update(testutil.MakeZone("example.com.")))
+	srv := newEdgeDNSSrv(&mockRS{}, zs)
 	token := getToken(t, srv)
+	domainID := findDomainID(t, srv, token, "example.com")
+
 	rr := authed(t, srv, token, "/NSRecordService/CreateNSRecord", map[string]any{
-		"nsDomainId":   1,
-		"name":         "www.example.com",
+		"nsDomainId":   domainID,
+		"name":         "www",
 		"type":         "A",
 		"value":        "2.2.2.2",
 		"ttl":          300,
 		"nsRouteCodes": []string{"province:上海", "isp:电信"},
 	})
 	assert.Equal(t, http.StatusOK, rr.Code)
+
 	// nsRouteCodes -> route_tags: "province:上海;isp:电信" stored as "province=上海;isp=电信"
-	assert.Equal(t, "province=上海;isp=电信", capturedTags)
+	rec := findStoredRecord(t, zs, "example.com.", "www.example.com.", mdns.TypeA)
+	assert.Equal(t, "province=上海;isp=电信", rec.RouteTags)
 }
 
 func TestEdgeDNS_CreateRecord_CountryRoute(t *testing.T) {
-	var capturedTags string
-	rs := &mockRS{
-		listZonesFn: func(_ context.Context) ([]iface.ZoneMeta, error) {
-			return []iface.ZoneMeta{{ID: 1, Name: "example.com."}}, nil
-		},
-		createRecordFn: func(_ context.Context, _ int64, rec *iface.Record) (*iface.Record, bool, error) {
-			capturedTags = rec.RouteTags
-			rec.ID = 79
-			return rec, true, nil
-		},
-	}
-	srv := newEdgeDNSSrv(rs, &testutil.MockZoneStore{})
+	zs := store.New()
+	require.NoError(t, zs.Update(testutil.MakeZone("example.com.")))
+	srv := newEdgeDNSSrv(&mockRS{}, zs)
 	token := getToken(t, srv)
+	domainID := findDomainID(t, srv, token, "example.com")
+
 	rr := authed(t, srv, token, "/NSRecordService/CreateNSRecord", map[string]any{
-		"nsDomainId":   1,
-		"name":         "cdn.example.com",
+		"nsDomainId":   domainID,
+		"name":         "cdn",
 		"type":         "A",
 		"value":        "3.3.3.3",
 		"ttl":          300,
 		"nsRouteCodes": []string{"country:中国"},
 	})
 	assert.Equal(t, http.StatusOK, rr.Code)
-	assert.Equal(t, "country=中国", capturedTags)
+
+	rec := findStoredRecord(t, zs, "example.com.", "cdn.example.com.", mdns.TypeA)
+	assert.Equal(t, "country=中国", rec.RouteTags)
 }
 
 func TestEdgeDNS_CreateRecord_ZoneNotFound(t *testing.T) {
-	rs := &mockRS{
-		listZonesFn: func(_ context.Context) ([]iface.ZoneMeta, error) {
-			return nil, nil // empty -> zone 999 not found
-		},
-	}
-	srv := newEdgeDNSSrv(rs, &testutil.MockZoneStore{})
+	srv := newEdgeDNSSrv(&mockRS{}, store.New()) // no zones -> 999 not found
 	token := getToken(t, srv)
 	rr := authed(t, srv, token, "/NSRecordService/CreateNSRecord", map[string]any{
 		"nsDomainId":   999,
-		"name":         "www.example.com",
+		"name":         "www",
 		"type":         "A",
 		"value":        "1.1.1.1",
 		"ttl":          300,
@@ -345,25 +356,18 @@ func TestEdgeDNS_CreateRecord_ZoneNotFound(t *testing.T) {
 }
 
 func TestEdgeDNS_DeleteRecord_Success(t *testing.T) {
-	var deletedID int64
-	rs := &mockRS{
-		listZonesFn: func(_ context.Context) ([]iface.ZoneMeta, error) {
-			return []iface.ZoneMeta{{ID: 1, Name: "example.com."}}, nil
-		},
-		listRecordsFn: func(_ context.Context, _ string) ([]*iface.Record, error) {
-			return []*iface.Record{{ID: 99, Name: "www.example.com.", Type: 1, Value: "1.1.1.1", TTL: 300}}, nil
-		},
-		softDeleteRecordFn: func(_ context.Context, _, id int64) error {
-			deletedID = id
-			return nil
-		},
-	}
-	srv := newEdgeDNSSrv(rs, &testutil.MockZoneStore{})
+	zs := store.New()
+	require.NoError(t, zs.Update(testutil.MakeZone("example.com.",
+		&iface.Record{ID: 99, Name: "www.example.com.", Type: mdns.TypeA, Value: "1.1.1.1", TTL: 300},
+	)))
+	srv := newEdgeDNSSrv(&mockRS{}, zs)
 	token := getToken(t, srv)
 	rr := authed(t, srv, token, "/NSRecordService/DeleteNSRecord", map[string]any{"nsRecordId": 99})
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, float64(200), edgeDNSCode(t, rr))
-	assert.Equal(t, int64(99), deletedID)
+
+	zone := zs.Snapshot()["example.com."]
+	assert.Empty(t, zone.Records[iface.RecordKey{Name: "www.example.com.", Qtype: mdns.TypeA}])
 }
 
 func TestEdgeDNS_DeleteRecord_MissingID(t *testing.T) {
@@ -446,21 +450,17 @@ func TestEdgeDNS_AgentAndCustomRoutes_Empty(t *testing.T) {
 // ── route_tags <-> nsRouteCodes round-trip ────────────────────────────────────
 
 func TestEdgeDNS_FindRecord_RouteTagsRoundtrip(t *testing.T) {
-	rs := &mockRS{
-		listZonesFn: func(_ context.Context) ([]iface.ZoneMeta, error) {
-			return []iface.ZoneMeta{{ID: 1, Name: "example.com."}}, nil
-		},
-		listRecordsFn: func(_ context.Context, _ string) ([]*iface.Record, error) {
-			return []*iface.Record{
-				{ID: 5, Name: "cdn.example.com.", Type: 1, Value: "9.9.9.9", TTL: 60, RouteTags: "country=中国;isp=电信"},
-			}, nil
-		},
-	}
-	srv := newEdgeDNSSrv(rs, &testutil.MockZoneStore{})
+	zs := store.New()
+	require.NoError(t, zs.Update(testutil.MakeZone("example.com.",
+		&iface.Record{ID: 5, Name: "cdn.example.com.", Type: mdns.TypeA, Value: "9.9.9.9", TTL: 60, RouteTags: "country=中国;isp=电信"},
+	)))
+	srv := newEdgeDNSSrv(&mockRS{}, zs)
 	token := getToken(t, srv)
+	domainID := findDomainID(t, srv, token, "example.com")
+
 	rr := authed(t, srv, token, "/NSRecordService/FindNSRecordWithNameAndType", map[string]any{
-		"nsDomainId": 1,
-		"name":       "cdn.example.com",
+		"nsDomainId": domainID,
+		"name":       "cdn",
 		"type":       "A",
 	})
 	assert.Equal(t, http.StatusOK, rr.Code)
@@ -479,23 +479,19 @@ func TestEdgeDNS_FindRecord_RouteTagsRoundtrip(t *testing.T) {
 }
 
 func TestEdgeDNS_FindRecords_Multiple(t *testing.T) {
-	rs := &mockRS{
-		listZonesFn: func(_ context.Context) ([]iface.ZoneMeta, error) {
-			return []iface.ZoneMeta{{ID: 1, Name: "example.com."}}, nil
-		},
-		listRecordsFn: func(_ context.Context, _ string) ([]*iface.Record, error) {
-			return []*iface.Record{
-				{ID: 1, Name: "cdn.example.com.", Type: 1, Value: "1.1.1.1", TTL: 60},
-				{ID: 2, Name: "cdn.example.com.", Type: 1, Value: "2.2.2.2", TTL: 60, RouteTags: "province=广东"},
-				{ID: 3, Name: "mail.example.com.", Type: 1, Value: "3.3.3.3", TTL: 60},
-			}, nil
-		},
-	}
-	srv := newEdgeDNSSrv(rs, &testutil.MockZoneStore{})
+	zs := store.New()
+	require.NoError(t, zs.Update(testutil.MakeZone("example.com.",
+		&iface.Record{ID: 1, Name: "cdn.example.com.", Type: mdns.TypeA, Value: "1.1.1.1", TTL: 60},
+		&iface.Record{ID: 2, Name: "cdn.example.com.", Type: mdns.TypeA, Value: "2.2.2.2", TTL: 60, RouteTags: "province=广东"},
+		&iface.Record{ID: 3, Name: "mail.example.com.", Type: mdns.TypeA, Value: "3.3.3.3", TTL: 60},
+	)))
+	srv := newEdgeDNSSrv(&mockRS{}, zs)
 	token := getToken(t, srv)
+	domainID := findDomainID(t, srv, token, "example.com")
+
 	rr := authed(t, srv, token, "/NSRecordService/FindNSRecordsWithNameAndType", map[string]any{
-		"nsDomainId": 1,
-		"name":       "cdn.example.com",
+		"nsDomainId": domainID,
+		"name":       "cdn",
 		"type":       "A",
 	})
 	var resp map[string]any

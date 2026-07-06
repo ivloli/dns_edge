@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>智能DNS功能需求文档</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:#f0f2f5;color:#333;line-height:1.7}
+a{color:#2563eb;text-decoration:none}
+a:hover{text-decoration:underline}
+.wrapper{display:flex;max-width:1440px;margin:0 auto}
+nav{width:240px;min-width:240px;position:sticky;top:0;height:100vh;overflow-y:auto;background:#1e293b;padding:20px 0;flex-shrink:0}
+main{flex:1;padding:32px 40px;min-width:0}
+nav .nav-title{color:#94a3b8;font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;padding:0 20px 12px;border-bottom:1px solid #334155;margin-bottom:8px}
+nav a{display:block;padding:7px 20px;color:#cbd5e1;font-size:13px;border-left:3px solid transparent;transition:all .15s}
+nav a:hover,nav a.active{background:#334155;color:#f1f5f9;border-left-color:#3b82f6;text-decoration:none}
+nav .nav-sub{padding-left:32px;font-size:12px}
+.page-header{background:#fff;border-radius:12px;padding:32px 40px;margin-bottom:28px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.page-header h1{font-size:26px;font-weight:700;color:#1e293b;margin-bottom:8px}
+.page-header .meta{color:#64748b;font-size:14px}
+.arch-box{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:18px 22px;margin:20px 0}
+.arch-box h3{color:#1d4ed8;font-size:14px;font-weight:600;margin-bottom:10px}
+.arch-box ul{padding-left:18px}
+.arch-box li{font-size:13px;color:#1e40af;margin-bottom:4px}
+.section{background:#fff;border-radius:12px;padding:28px 32px;margin-bottom:24px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.section h2{font-size:18px;font-weight:700;color:#1e293b;padding-left:14px;border-left:4px solid #3b82f6;margin-bottom:20px}
+.section h3{font-size:15px;font-weight:600;color:#374151;margin:22px 0 12px;padding-left:10px;border-left:3px solid #93c5fd}
+.section h4{font-size:13px;font-weight:600;color:#6b7280;margin:16px 0 8px;text-transform:uppercase;letter-spacing:.5px}
+.section p{font-size:14px;color:#4b5563;margin-bottom:12px}
+table{width:100%;border-collapse:collapse;font-size:13px;margin:12px 0}
+th{background:#2c3e50;color:#fff;padding:10px 14px;text-align:left;font-weight:600}
+td{padding:9px 14px;border-bottom:1px solid #e5e7eb;vertical-align:top}
+tr:nth-child(even) td{background:#f8fafc}
+tr:last-child td{border-bottom:none}
+td code{background:#f1f5f9;padding:2px 6px;border-radius:4px;font-family:"JetBrains Mono","Fira Code",monospace;font-size:12px;color:#e11d48}
+.badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600}
+.badge-todo{background:#fff3cd;color:#92400e;border:1px solid #fcd34d}
+.badge-done{background:#d1fae5;color:#065f46;border:1px solid #6ee7b7}
+.badge-eval{background:#e0e7ff;color:#3730a3;border:1px solid #a5b4fc}
+.route{display:inline-block;background:#0f172a;color:#7dd3fc;font-family:monospace;font-size:12px;padding:3px 10px;border-radius:5px;margin-bottom:14px}
+.api-chip{display:inline-block;background:#ecfdf5;color:#065f46;font-family:monospace;font-size:12px;padding:2px 8px;border-radius:5px;margin-left:8px;border:1px solid #a7f3d0}
+.note{background:#fefce8;border-left:4px solid #fbbf24;padding:12px 16px;border-radius:0 6px 6px 0;font-size:13px;color:#78350f;margin:12px 0}
+footer{text-align:center;padding:32px;color:#94a3b8;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrapper">
+<nav>
+  <div class="nav-title">智能DNS需求文档</div>
+  <a href="#overview">概览</a>
+  <a href="#s1">1. 看板</a>
+  <a href="#s2">2. 域名管理</a>
+  <a href="#s2-1" class="nav-sub">2.1 域名列表</a>
+  <a href="#s2-2" class="nav-sub">2.2 域名详情</a>
+  <a href="#s2-3" class="nav-sub">2.3 域名分组</a>
+  <a href="#s2-4" class="nav-sub">2.4 批量操作</a>
+  <a href="#s3">3. 记录管理</a>
+  <a href="#s3-1" class="nav-sub">3.1 记录类型</a>
+  <a href="#s3-2" class="nav-sub">3.2 记录操作</a>
+  <a href="#s3-3" class="nav-sub">3.3 健康检查</a>
+  <a href="#s4">4. 集群管理</a>
+  <a href="#s4-1" class="nav-sub">4.1 集群列表</a>
+  <a href="#s4-2" class="nav-sub">4.2 集群节点</a>
+  <a href="#s4-3" class="nav-sub">4.3 集群设置</a>
+  <a href="#s5">5. 线路管理</a>
+  <a href="#s6">6. TSIG 密钥</a>
+  <a href="#s7">7. 全局配置</a>
+  <a href="#s8">8. 访问日志</a>
+  <a href="#s9">9. 运行日志</a>
+  <a href="#s10">10. 解析测试</a>
+  <a href="#s11">11. 待开发对齐</a>
+</nav>
+<main>
+
+<div class="page-header">
+  <h1>智能DNS 功能需求文档</h1>
+  <div class="meta">基于商业版 GoEdge v1.3.9 实地调研 &nbsp;·&nbsp; 2026-06-30 &nbsp;·&nbsp; 排除「用户套餐」「套餐设置」两个模块</div>
+</div>
+
+<div class="section" id="overview">
+  <h2>概览</h2>
+  <p>本文档基于对商业版 GoEdge（<code>http://172.31.32.12:7788</code>）的实地登录调研，完整梳理「智能DNS」模块的所有功能点和数据结构，供开发对齐使用。</p>
+  <div class="arch-box">
+    <h3>架构解耦说明</h3>
+    <ul>
+      <li>智能DNS（NS）与 CDN / HTTP 层完全解耦，两套独立数据库表</li>
+      <li><strong>NSDomain</strong>（NS域名）≠ <strong>Server</strong>（网站），互不影响</li>
+      <li><strong>NSCluster</strong>（NS集群）≠ <strong>NodeCluster</strong>（边缘节点集群），独立调度</li>
+      <li><strong>NSRoute</strong>（线路）控制 DNS 分地区解析，与 CDN 回源策略无关</li>
+    </ul>
+  </div>
+</div>
+
+<div class="section" id="s1">
+  <h2>1. 看板</h2>
+  <span class="route">/ns</span>
+  <span class="api-chip">NSService.composeNSBoard</span>
+  <p style="margin-top:12px">NS 模块首页，展示全局统计数字。</p>
+  <table>
+    <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+    <tr><td><code>countClusters</code></td><td>int</td><td>集群总数</td></tr>
+    <tr><td><code>countDomains</code></td><td>int</td><td>域名总数</td></tr>
+    <tr><td><code>countNodes</code></td><td>int</td><td>节点总数</td></tr>
+    <tr><td><code>countOfflineNodes</code></td><td>int</td><td>离线节点数</td></tr>
+    <tr><td><code>countRecords</code></td><td>int</td><td>解析记录总数</td></tr>
+  </table>
+</div>
+
+<div class="section" id="s2">
+  <h2>2. 域名管理</h2>
+
+  <h3 id="s2-1">2.1 域名列表</h3>
+  <span class="route">/ns/domains</span>
+  <span class="api-chip">NSDomainService</span>
+  <h4>筛选条件</h4>
+  <table>
+    <tr><th>参数</th><th>说明</th></tr>
+    <tr><td><code>clusterId</code></td><td>按集群筛选（0=全部）</td></tr>
+    <tr><td><code>groupId</code></td><td>按分组筛选（0=全部）</td></tr>
+    <tr><td><code>userId</code></td><td>按用户筛选（0=全部）</td></tr>
+    <tr><td><code>keyword</code></td><td>关键字搜索（域名名称）</td></tr>
+    <tr><td><code>page</code></td><td>分页页码</td></tr>
+  </table>
+  <h4>列表字段</h4>
+  <table>
+    <tr><th>字段</th><th>说明</th></tr>
+    <tr><td><code>id / name</code></td><td>域名ID / 域名名称（如 example.com）</td></tr>
+    <tr><td><code>cluster</code></td><td>所属集群（id/name）</td></tr>
+    <tr><td><code>groups</code></td><td>所属分组列表</td></tr>
+    <tr><td><code>user</code></td><td>所属用户（id/username/fullname）</td></tr>
+    <tr><td><code>countRecords</code></td><td>解析记录数</td></tr>
+    <tr><td><code>status / statusName</code></td><td>验证状态（verified=已验证）</td></tr>
+    <tr><td><code>isOn</code></td><td>启用开关</td></tr>
+  </table>
+  <h4>操作</h4>
+  <p>新增、编辑、删除、启停、批量删除（<code>deleteNSDomains</code>）、从 DNS Provider 同步（<code>syncDNSDomainsFromProvider</code>）</p>
+
+  <h3 id="s2-2">2.2 域名详情</h3>
+  <span class="route">/ns/domains/domain?domainId=:id</span>
+  <table>
+    <tr><th>字段</th><th>说明</th></tr>
+    <tr><td><code>name</code></td><td>域名名称</td></tr>
+    <tr><td><code>cluster</code></td><td>所属集群</td></tr>
+    <tr><td><code>user</code></td><td>所属用户</td></tr>
+    <tr><td><code>countRecords</code></td><td>记录数</td></tr>
+    <tr><td><code>countKeys</code></td><td>TSIG 密钥数</td></tr>
+    <tr><td><code>enableHealthCheck</code></td><td>健康检查总开关</td></tr>
+    <tr><td><code>groups</code></td><td>所属分组</td></tr>
+    <tr><td><code>status / statusName</code></td><td>验证状态</td></tr>
+  </table>
+  <div class="note">域名详情页包含子功能入口：记录管理、TSIG 密钥、域名验证（verifyNSDomain）、健康检查配置</div>
+
+  <h3 id="s2-3">2.3 域名分组</h3>
+  <span class="route">/ns/domains/groups</span>
+  <span class="api-chip">NSDomainGroupService</span>
+  <table>
+    <tr><th>方法</th><th>说明</th></tr>
+    <tr><td><code>createNSDomainGroup</code></td><td>创建分组</td></tr>
+    <tr><td><code>updateNSDomainGroup</code></td><td>更新分组</td></tr>
+    <tr><td><code>deleteNSDomainGroup</code></td><td>删除分组</td></tr>
+    <tr><td><code>findAllNSDomainGroups</code></td><td>获取所有分组</td></tr>
+    <tr><td><code>findAllAvailableNSDomainGroups</code></td><td>获取可用分组</td></tr>
+  </table>
+
+  <h3 id="s2-4">2.4 批量操作</h3>
+  <span class="route">/ns/domains/batch</span>
+  <table>
+    <tr><th>方法</th><th>说明</th></tr>
+    <tr><td><code>createNSDomains</code></td><td>批量创建域名</td></tr>
+    <tr><td><code>deleteNSDomains</code></td><td>批量删除域名</td></tr>
+    <tr><td><code>existNSDomains</code></td><td>批量检查域名是否存在</td></tr>
+    <tr><td><code>existVerifiedNSDomains</code></td><td>批量检查是否已验证</td></tr>
+  </table>
+</div>
+
+<div class="section" id="s3">
+  <h2>3. 记录管理</h2>
+  <span class="api-chip">NSRecordService</span>
+  <p style="margin-top:12px">记录管理位于域名详情页内，支持 9 种记录类型。</p>
+
+  <h3 id="s3-1">3.1 支持的记录类型</h3>
+  <table>
+    <tr><th>类型</th><th>说明</th><th>可自定义</th></tr>
+    <tr><td><code>A</code></td><td>将域名指向一个 IPv4 地址</td><td>是</td></tr>
+    <tr><td><code>CNAME</code></td><td>将域名指向另外一个域名</td><td>是</td></tr>
+    <tr><td><code>AAAA</code></td><td>将域名指向一个 IPv6 地址</td><td>是</td></tr>
+    <tr><td><code>MX</code></td><td>将域名指向邮件服务器地址</td><td>是</td></tr>
+    <tr><td><code>TXT</code></td><td>文本记录，通常用于 SPF 或域名所有权验证（限512字节）</td><td>是</td></tr>
+    <tr><td><code>SRV</code></td><td>记录提供特定服务的服务器</td><td>是</td></tr>
+    <tr><td><code>CAA</code></td><td>CA 证书颁发机构授权校验</td><td>是</td></tr>
+    <tr><td><code>NS</code></td><td>将子域名指定其他 DNS 服务器解析</td><td>否（系统管理）</td></tr>
+    <tr><td><code>SOA</code></td><td>起始授权机构记录</td><td>否（系统管理）</td></tr>
+  </table>
+
+  <h3 id="s3-2">3.2 记录操作方法</h3>
+  <table>
+    <tr><th>方法</th><th>说明</th></tr>
+    <tr><td><code>createNSRecord</code></td><td>创建单条记录</td></tr>
+    <tr><td><code>createNSRecords</code></td><td>批量创建记录</td></tr>
+    <tr><td><code>importNSRecords</code></td><td>文件导入记录</td></tr>
+    <tr><td><code>updateNSRecord</code></td><td>更新单条记录</td></tr>
+    <tr><td><code>deleteNSRecord</code></td><td>删除单条记录</td></tr>
+    <tr><td><code>listNSRecords</code></td><td>记录列表（分页）</td></tr>
+    <tr><td><code>findNSRecord</code></td><td>获取单条记录详情</td></tr>
+    <tr><td><code>findNSRecordWithNameAndType</code></td><td>按名称+类型精确查询</td></tr>
+    <tr><td><code>createNSRecordsWithDomainNames</code></td><td>按域名批量创建</td></tr>
+    <tr><td><code>updateNSRecordsWithDomainNames</code></td><td>按域名批量更新</td></tr>
+    <tr><td><code>deleteNSRecordsWithDomainNames</code></td><td>按域名批量删除</td></tr>
+    <tr><td><code>updateNSRecordsIsOnWithDomainNames</code></td><td>按域名批量启停</td></tr>
+    <tr><td><code>listNSRecordsAfterVersion</code></td><td>增量同步（按版本号）</td></tr>
+    <tr><td><code>updateNSRecordIsUp</code></td><td>手动标记记录 up / down</td></tr>
+  </table>
+
+  <h3 id="s3-3">3.3 健康检查</h3>
+  <table>
+    <tr><th>层级</th><th>字段/方法</th><th>说明</th></tr>
+    <tr><td>域名级</td><td><code>enableHealthCheck</code></td><td>健康检查总开关，在域名详情页配置</td></tr>
+    <tr><td>记录级</td><td><code>findNSRecordHealthCheck</code><br><code>updateNSRecordHealthCheck</code></td><td>每条记录可独立配置健康检查策略</td></tr>
+    <tr><td>手动干预</td><td><code>updateNSRecordIsUp</code></td><td>管理员手动将记录标记为 up 或 down</td></tr>
+  </table>
+</div>
+
+<div class="section" id="s4">
+  <h2>4. 集群管理</h2>
+
+  <h3 id="s4-1">4.1 集群列表</h3>
+  <span class="route">/ns/clusters</span>
+  <span class="api-chip">NSClusterService</span>
+  <table>
+    <tr><th>字段</th><th>说明</th></tr>
+    <tr><td><code>id / name</code></td><td>集群ID / 名称</td></tr>
+    <tr><td><code>isOn</code></td><td>启用状态</td></tr>
+    <tr><td><code>countAllNodes</code></td><td>节点总数</td></tr>
+    <tr><td><code>countActiveNodes</code></td><td>活跃节点数</td></tr>
+    <tr><td><code>countDomains</code></td><td>关联域名数</td></tr>
+    <tr><td><code>countUpgradeNodes</code></td><td>可升级节点数</td></tr>
+  </table>
+
+  <h3 id="s4-2">4.2 集群节点</h3>
+  <span class="route">/ns/clusters/cluster?clusterId=:id</span>
+  <span class="api-chip">NSNodeService</span>
+  <h4>节点字段</h4>
+  <table>
+    <tr><th>字段</th><th>说明</th></tr>
+    <tr><td><code>id / name</code></td><td>节点ID / 名称</td></tr>
+    <tr><td><code>ipAddresses</code></td><td>IP列表（含可访问性、在线状态 isUp）</td></tr>
+    <tr><td><code>isInstalled</code></td><td>是否已安装</td></tr>
+    <tr><td><code>isOn / isUp</code></td><td>启用状态 / 在线状态</td></tr>
+    <tr><td><code>installStatus</code></td><td>安装进度（isRunning/isFinished/isOk/error）</td></tr>
+    <tr><td><code>status.cpuUsage</code></td><td>CPU 使用率</td></tr>
+    <tr><td><code>apiNodeAddrs</code></td><td>关联的 API 节点地址列表</td></tr>
+  </table>
+  <h4>节点操作方法</h4>
+  <table>
+    <tr><th>方法</th><th>说明</th></tr>
+    <tr><td><code>createNSNode</code></td><td>新增节点</td></tr>
+    <tr><td><code>updateNSNode</code></td><td>更新节点配置</td></tr>
+    <tr><td><code>deleteNSNode</code></td><td>删除节点</td></tr>
+    <tr><td><code>installNSNode</code></td><td>安装节点（远程部署）</td></tr>
+    <tr><td><code>findNSNodeInstallStatus</code></td><td>查询安装进度</td></tr>
+    <tr><td><code>startNSNode / stopNSNode</code></td><td>启动 / 停止节点</td></tr>
+    <tr><td><code>checkNSNodeLatestVersion</code></td><td>检查是否有新版本</td></tr>
+    <tr><td><code>sendCommandToNSNode</code></td><td>向节点发送控制命令</td></tr>
+    <tr><td><code>updateNSNodeLogin</code></td><td>更新 SSH 登录凭证</td></tr>
+    <tr><td><code>updateNSNodeAPIConfig</code></td><td>更新节点 API 连接配置</td></tr>
+  </table>
+
+  <h3 id="s4-3">4.3 集群设置（完整子菜单）</h3>
+
+  <h4>① 基础设置 — /ns/clusters/cluster/settings?clusterId=:id</h4>
+  <table>
+    <tr><th>字段</th><th>说明</th></tr>
+    <tr><td><code>name</code></td><td>集群名称</td></tr>
+    <tr><td><code>timeZone</code></td><td>时区（如 Asia/Shanghai）</td></tr>
+    <tr><td><code>email</code></td><td>管理员邮箱</td></tr>
+    <tr><td><code>hosts</code></td><td>NS 主机名列表（如 ns1.example.com）</td></tr>
+    <tr><td><code>autoRemoteStart</code></td><td>是否自动远程启动节点</td></tr>
+    <tr><td><code>checkingPorts</code></td><td>是否检测端口可用性</td></tr>
+    <tr><td><code>detectAgents</code></td><td>是否检测 Agent 节点</td></tr>
+  </table>
+
+  <h4>② UDP — .../settings/udp</h4>
+  <p>默认开启，监听 UDP 53 端口。字段：<code>isOn</code>, <code>listen[]</code>（protocol / host / portRange）</p>
+
+  <h4>③ TCP — .../settings/tcp</h4>
+  <p>默认开启，监听 TCP 53 端口。字段同 UDP。</p>
+
+  <h4>④ TLS — .../settings/tls</h4>
+  <p>DNS over TLS，默认关闭。额外字段：<code>sslPolicy</code>（SSL 证书策略）</p>
+
+  <h4>⑤ DoH — .../settings/doh</h4>
+  <p>DNS over HTTPS，默认关闭，监听 HTTPS 443 端口。额外字段：<code>sslPolicy</code></p>
+
+  <h4>⑥ 访问日志 — .../settings/accessLog</h4>
+  <table>
+    <tr><th>字段</th><th>默认值</th><th>说明</th></tr>
+    <tr><td><code>isOn</code></td><td>true</td><td>是否开启访问日志</td></tr>
+    <tr><td><code>logMissingDomains</code></td><td>false</td><td>是否记录未命中的域名</td></tr>
+    <tr><td><code>missingRecordsOnly</code></td><td>false</td><td>是否只记录缺失记录的查询</td></tr>
+    <tr><td><code>isPrior</code></td><td>false</td><td>是否覆盖全局默认配置</td></tr>
+  </table>
+
+  <h4>⑦ 应答模式 — .../settings/answer</h4>
+  <table>
+    <tr><th>模式</th><th>说明</th></tr>
+    <tr><td><code>random</code>（随机）</td><td>有多个查询结果时，随机选取若干结果返回</td></tr>
+    <tr><td><code>roundRobin</code>（轮询）</td><td>有多个查询结果时，按顺序每次返回其中一个；此模式下记录权重不生效</td></tr>
+  </table>
+  <p>额外字段：<code>maxSize</code>（多记录时最多返回条数）</p>
+
+  <h4>⑧ SOA — .../settings/soa</h4>
+  <table>
+    <tr><th>字段</th><th>说明</th></tr>
+    <tr><td><code>mName</code></td><td>主 NS 服务器名称</td></tr>
+    <tr><td><code>rName</code></td><td>管理员邮箱（SOA 格式）</td></tr>
+    <tr><td><code>serial</code></td><td>序列号</td></tr>
+    <tr><td><code>refreshSeconds</code></td><td>刷新间隔（默认 7200 秒）</td></tr>
+    <tr><td><code>retrySeconds</code></td><td>重试间隔（默认 3600 秒）</td></tr>
+    <tr><td><code>expireSeconds</code></td><td>过期时间（默认 1209600 秒 = 14 天）</td></tr>
+    <tr><td><code>minimumTTL</code></td><td>最小 TTL（默认 3600 秒）</td></tr>
+    <tr><td><code>hosts</code></td><td>覆盖集群 NS 主机名列表</td></tr>
+  </table>
+
+  <h4>⑨ 递归DNS — .../settings/recursion</h4>
+  <table>
+    <tr><th>字段</th><th>默认值</th><th>说明</th></tr>
+    <tr><td><code>isOn</code></td><td>false</td><td>是否开启递归解析</td></tr>
+    <tr><td><code>hosts</code></td><td>null</td><td>上游 DNS 地址列表</td></tr>
+    <tr><td><code>useLocalHosts</code></td><td>true</td><td>是否使用本地 hosts 文件</td></tr>
+    <tr><td><code>allowDomains</code></td><td>null</td><td>允许递归的域名白名单</td></tr>
+    <tr><td><code>denyDomains</code></td><td>null</td><td>拒绝递归的域名黑名单</td></tr>
+  </table>
+
+  <h4>⑩ DDoS 防护 — .../settings/ddos-protection</h4>
+  <p>TCP 层 DDoS 防护，默认阈值如下：</p>
+  <table>
+    <tr><th>字段</th><th>默认值</th><th>说明</th></tr>
+    <tr><td><code>tcpMaxConnections</code></td><td>100000</td><td>TCP 最大连接数</td></tr>
+    <tr><td><code>tcpMaxConnectionsPerIP</code></td><td>1000</td><td>单 IP 最大连接数</td></tr>
+    <tr><td><code>tcpMinConnectionsPerIP</code></td><td>5</td><td>触发防护的单 IP 最小连接数</td></tr>
+    <tr><td><code>tcpNewConnectionsMinutelyRate</code></td><td>500</td><td>每分钟新连接速率上限</td></tr>
+    <tr><td><code>tcpNewConnectionsSecondlyRate</code></td><td>300</td><td>每秒新连接速率上限</td></tr>
+    <tr><td><code>tcpNewConnectionsMinMinutelyRate</code></td><td>3</td><td>每分钟新连接最小速率（低于此值不触发）</td></tr>
+    <tr><td><code>tcpNewConnectionsMinSecondlyRate</code></td><td>3</td><td>每秒新连接最小速率（低于此值不触发）</td></tr>
+  </table>
+</div>
+
+<div class="section" id="s5">
+  <h2>5. 线路管理</h2>
+  <span class="route">/ns/routes</span>
+  <span class="api-chip">NSRouteService</span>
+  <span class="api-chip">NSRouteCategoryService</span>
+
+  <h3>5.1 内置线路（系统预置，不可删除）</h3>
+  <table>
+    <tr><th>线路类型</th><th>API 方法</th></tr>
+    <tr><td>世界地区线路</td><td><code>findAllDefaultWorldRegionRoutes</code></td></tr>
+    <tr><td>中国省份线路</td><td><code>findAllDefaultChinaProvinceRoutes</code></td></tr>
+    <tr><td>运营商线路（电信/联通/移动等）</td><td><code>findAllDefaultISPRoutes</code></td></tr>
+    <tr><td>Agent 线路</td><td><code>findAllAgentNSRoutes</code></td></tr>
+    <tr><td>公共线路</td><td><code>findAllPublicNSRoutes</code></td></tr>
+  </table>
+
+  <h3>5.2 自定义线路操作</h3>
+  <table>
+    <tr><th>方法</th><th>说明</th></tr>
+    <tr><td><code>createNSRoute</code></td><td>创建自定义线路</td></tr>
+    <tr><td><code>updateNSRoute</code></td><td>更新线路</td></tr>
+    <tr><td><code>deleteNSRoute</code></td><td>删除线路</td></tr>
+    <tr><td><code>findNSRoute</code></td><td>获取线路详情</td></tr>
+    <tr><td><code>findAllNSRoutes</code></td><td>获取所有线路</td></tr>
+    <tr><td><code>updateNSRouteOrders</code></td><td>线路排序</td></tr>
+    <tr><td><code>listNSRoutesAfterVersion</code></td><td>增量同步（版本号机制）</td></tr>
+  </table>
+
+  <h3>5.3 线路分类</h3>
+  <span class="route">/ns/routes/categories</span>
+  <table>
+    <tr><th>方法</th><th>说明</th></tr>
+    <tr><td><code>createNSRouteCategory</code></td><td>创建分类</td></tr>
+    <tr><td><code>updateNSRouteCategory</code></td><td>更新分类</td></tr>
+    <tr><td><code>deleteNSRouteCategory</code></td><td>删除分类</td></tr>
+    <tr><td><code>findAllNSRouteCategories</code></td><td>获取所有分类</td></tr>
+    <tr><td><code>updateNSRouteCategoryOrders</code></td><td>分类排序</td></tr>
+  </table>
+</div>
+
+<div class="section" id="s6">
+  <h2>6. TSIG 密钥</h2>
+  <span class="api-chip">NSKeyService</span>
+  <p style="margin-top:12px">TSIG（Transaction SIGnature）用于 DNS 区域传送（AXFR / IXFR）的 HMAC 认证，配置入口在域名详情页。</p>
+  <table>
+    <tr><th>方法</th><th>说明</th></tr>
+    <tr><td><code>createNSKey</code></td><td>创建密钥</td></tr>
+    <tr><td><code>updateNSKey</code></td><td>更新密钥</td></tr>
+    <tr><td><code>deleteNSKey</code></td><td>删除密钥</td></tr>
+    <tr><td><code>findNSKey</code></td><td>获取密钥详情</td></tr>
+    <tr><td><code>listNSKeys</code></td><td>密钥列表</td></tr>
+    <tr><td><code>listNSKeysAfterVersion</code></td><td>增量同步</td></tr>
+  </table>
+</div>
+
+<div class="section" id="s7">
+  <h2>7. 全局配置</h2>
+  <span class="route">/ns/settings</span>
+
+  <h3>7.1 用户设置 — /ns/settings/user</h3>
+  <p>配置新用户的默认套餐能力上限，以及全局默认集群。</p>
+  <table>
+    <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+    <tr><td><code>defaultClusterId</code></td><td>int</td><td>默认集群 ID（0=未指定）</td></tr>
+    <tr><td><code>defaultPlanConfig.supportCountryRoutes</code></td><td>bool</td><td>默认是否支持国家线路</td></tr>
+    <tr><td><code>defaultPlanConfig.supportChinaProvinceRoutes</code></td><td>bool</td><td>默认是否支持中国省份线路</td></tr>
+    <tr><td><code>defaultPlanConfig.supportISPRoutes</code></td><td>bool</td><td>默认是否支持运营商线路</td></tr>
+    <tr><td><code>defaultPlanConfig.supportAgentRoutes</code></td><td>bool</td><td>默认是否支持 Agent 线路</td></tr>
+    <tr><td><code>defaultPlanConfig.supportPublicRoutes</code></td><td>bool</td><td>默认是否支持公共线路</td></tr>
+    <tr><td><code>defaultPlanConfig.maxCustomRoutes</code></td><td>int</td><td>默认最大自定义线路数（0=不限）</td></tr>
+    <tr><td><code>defaultPlanConfig.minTTL</code></td><td>int</td><td>默认最小 TTL（秒，默认 60）</td></tr>
+    <tr><td><code>defaultPlanConfig.maxDomains</code></td><td>int</td><td>默认最大域名数（默认 100）</td></tr>
+    <tr><td><code>defaultPlanConfig.maxRecordsPerDomain</code></td><td>int</td><td>每域名默认最大记录数（默认 1000）</td></tr>
+    <tr><td><code>clusterHosts</code></td><td>[]string</td><td>集群主机名列表</td></tr>
+  </table>
+
+  <h3>7.2 访问日志设置 — /ns/settings/accesslogs</h3>
+  <p>全局默认日志策略，各集群可通过 <code>isPrior=true</code> 覆盖。字段同集群级访问日志（第 4.3.6 节）。</p>
+</div>
+
+<div class="section" id="s8">
+  <h2>8. 访问日志</h2>
+  <span class="route">/ns/clusters/accessLogs</span>
+  <span class="api-chip">NSAccessLogService.listNSAccessLogs</span>
+  <h4>筛选条件</h4>
+  <table>
+    <tr><th>参数</th><th>说明</th></tr>
+    <tr><td><code>clusterId</code></td><td>按集群筛选（0=全部）</td></tr>
+    <tr><td><code>nodeId</code></td><td>按节点筛选（0=全部）</td></tr>
+    <tr><td><code>day</code></td><td>日期（格式 YYYY-MM-DD）</td></tr>
+    <tr><td><code>keyword</code></td><td>关键字（域名 / IP）</td></tr>
+    <tr><td><code>recordType</code></td><td>记录类型（A / CNAME / AAAA 等，空=全部）</td></tr>
+    <tr><td><code>lastRequestId / nextRequestId</code></td><td>游标翻页（实时滚动）</td></tr>
+  </table>
+  <div class="note">日志内容包含：查询域名、记录类型、来源 IP、所属地区（region）信息。</div>
+</div>
+
+<div class="section" id="s9">
+  <h2>9. 运行日志</h2>
+  <span class="route">/ns/clusters/logs</span>
+  <table>
+    <tr><th>参数</th><th>说明</th></tr>
+    <tr><td><code>dayFrom / dayTo</code></td><td>日期范围</td></tr>
+    <tr><td><code>keyword</code></td><td>关键字搜索</td></tr>
+    <tr><td><code>level</code></td><td>日志级别（info / warn / error 等）</td></tr>
+    <tr><td><code>page</code></td><td>分页页码</td></tr>
+  </table>
+</div>
+
+<div class="section" id="s10">
+  <h2>10. 解析测试</h2>
+  <span class="route">/ns/test</span>
+  <p style="margin-top:12px">在管理后台直接向指定集群发起 DNS 解析请求，实时验证解析结果是否符合预期，无需借助外部工具。</p>
+  <table>
+    <tr><th>字段</th><th>说明</th></tr>
+    <tr><td><code>clusterId</code></td><td>选择目标集群（下拉列表，显示节点数）</td></tr>
+    <tr><td><code>domain</code></td><td>要测试的域名（如 www.example.com）</td></tr>
+    <tr><td><code>recordType</code></td><td>记录类型（9 种，见第 3.1 节）</td></tr>
+  </table>
+</div>
+
+<div class="section" id="s11">
+  <h2>11. 待开发功能对齐</h2>
+  <p>以下功能在商业版 API 层面已完整，前端页面路由已存在，需评估是否纳入我们的版本开发范围。</p>
+  <table>
+    <tr><th>模块</th><th>功能</th><th>状态</th><th>备注</th></tr>
+    <tr>
+      <td>集群</td>
+      <td>DDoS 防护（TCP 层）</td>
+      <td><span class="badge badge-todo">待开发</span></td>
+      <td>路由和数据结构已确认，需前端开发</td>
+    </tr>
+    <tr>
+      <td>记录</td>
+      <td>健康检查</td>
+      <td><span class="badge badge-todo">待开发</span></td>
+      <td>API 完整（findNSRecordHealthCheck / updateNSRecordHealthCheck）</td>
+    </tr>
+    <tr>
+      <td>记录</td>
+      <td>文件导入记录</td>
+      <td><span class="badge badge-eval">评估中</span></td>
+      <td>API 完整（importNSRecords），格式待确认</td>
+    </tr>
+    <tr>
+      <td>域名</td>
+      <td>TSIG 密钥管理</td>
+      <td><span class="badge badge-eval">评估中</span></td>
+      <td>API 完整（NSKeyService），使用场景相对小众</td>
+    </tr>
+    <tr>
+      <td>域名</td>
+      <td>从 DNS Provider 同步域名</td>
+      <td><span class="badge badge-eval">评估中</span></td>
+      <td>syncDNSDomainsFromProvider，依赖 DNSProviderService</td>
+    </tr>
+    <tr>
+      <td>集群</td>
+      <td>DoH（DNS over HTTPS）</td>
+      <td><span class="badge badge-eval">评估中</span></td>
+      <td>API 完整，需评估是否面向用户开放</td>
+    </tr>
+    <tr>
+      <td>集群</td>
+      <td>TLS（DNS over TLS）</td>
+      <td><span class="badge badge-eval">评估中</span></td>
+      <td>API 完整，同上</td>
+    </tr>
+    <tr>
+      <td>线路</td>
+      <td>自定义线路 + 分类</td>
+      <td><span class="badge badge-todo">待开发</span></td>
+      <td>NSRouteService / NSRouteCategoryService 均已完整</td>
+    </tr>
+    <tr>
+      <td>统计</td>
+      <td>热门记录按小时统计图表</td>
+      <td><span class="badge badge-todo">待开发</span></td>
+      <td>NSRecordHourlyStatService，需前端图表组件</td>
+    </tr>
+  </table>
+</div>
+
+<footer>
+  基于商业版 GoEdge v1.3.9 实地调研 &nbsp;·&nbsp; 生成时间 2026-06-30
+</footer>
+
+</main>
+</div>
+
+<script>
+const sections = document.querySelectorAll('[id]');
+const navLinks = document.querySelectorAll('nav a');
+window.addEventListener('scroll', () => {
+  let current = '';
+  sections.forEach(s => { if (window.scrollY >= s.offsetTop - 80) current = s.id; });
+  navLinks.forEach(a => { a.classList.toggle('active', a.getAttribute('href') === '#' + current); });
+});
+</script>
+</body>
+</html>

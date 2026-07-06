@@ -1,7 +1,7 @@
-# ECS 地理路由方案（ip2region + 字典树）
+# ECS 地理路由方案（ip2region + filterByGeo）
 
-**版本**：v1.0  
-**日期**：2026-06-25
+**版本**：v2.0  
+**日期**：2026-06-27
 
 ---
 
@@ -34,71 +34,102 @@ dns-edge
 ## 3. ip2region xdb
 
 - 二进制文件，约 11 MB
-- 每条记录格式：`国家|区域|省份|城市|ISP`（`|` 分隔，无数据用 `0` 占位）
-- 查询方式：`searcher.SearchByStr(ip)` → `"中国|华东|上海|上海|电信"`
+- 记录格式：`|` 分隔，无数据用 `0` 占位，支持两种变体：
+  - **4 字段**：`国家|省份|城市|ISP`（旧版/社区版常见）
+  - **5 字段**：`国家|区域|省份|城市|ISP`（官方最新版，多一个大区字段）
+- 查询方式：`searcher.SearchByStr(ip)` → `"中国|华东|上海|上海|电信"`（5 字段）或 `"中国|上海|上海|电信"`（4 字段）
 - 支持三种加载模式：File（最省内存）、VectorIndex（推荐，约 1.5 MB 额外内存，查询 < 1 µs）、MemorySearch（全量加载，最快）
 
 推荐用 **VectorIndex 模式**，在 dns-edge 启动时加载一次，查询无 I/O。
 
+`internal/geo/geo.go` 的 `parseRegion` 同时兼容 4/5 字段格式：5 字段时省份在 index 2、ISP 在 index 4；4 字段时省份在 index 1、ISP 在 index 3。
+
 ---
 
-## 4. 路由字典树设计
+## 4. filterByGeo 扁平聚合设计
 
-### 4.1 树结构
+### 4.1 核心思路
 
-节点层级（从粗到细）：
+**不使用字典树**，而是采用 **flat map 聚合**：
 
-```
-root
- └─ 国家（Country）
-     └─ ISP（运营商）       ← 最核心的分流维度
-         └─ 省份（Province）
-             └─ 城市（City）  ← 可选，按需启用
-```
+1. 遍历所有记录，按 `r.Value`（目标 IP）分组
+2. 每个 IP 累积布尔标志：`matchProvince`、`matchISP`、`matchCountry`、`isDefault`
+3. 最后按优先级层级筛选：`provinceISP > province > isp > country > default > all`
 
-每个节点存储：
-- `children map[string]*RouteNode`
-- `records []*iface.Record` — 该节点命中时返回的 IP 组（nil 表示继续向上 fallback）
+这样避免了树的递归构建和查询开销，单次查询时间 < 5 µs（纯 map 查找 + 布尔运算）。
 
-### 4.2 Fallback 规则
-
-匹配从最细粒度开始，逐级向上退：
-
-```
-city → province → ISP → country → default（全局兜底）
-```
-
-例：客户端是上海电信，但字典树只配置到省份级别 → 命中"中国/电信/上海"节点失败 → 退回"中国/电信" → 命中返回电信 IP 组。
-
-### 4.3 数据结构（Go）
+### 4.2 数据结构（Go）
 
 ```go
-type RouteNode struct {
-    children map[string]*RouteNode
-    records  []*iface.Record // nil = no override at this level
+type ipEntry struct {
+    rec             *iface.Record
+    matchProvince   bool
+    matchISP        bool
+    matchCountry    bool
+    matchProvinceISP bool
+    isDefault       bool
 }
 
-type GeoRouter struct {
-    root    *RouteNode
-    searcher *ip2region.Searcher // xdb VectorIndex
+// filterByGeo 内部逻辑
+func filterByGeo(allRecords []*iface.Record, province, isp, country string) []*iface.Record {
+    ipMap := make(map[string]*ipEntry) // key = r.Value（IP 地址）
+    
+    for _, r := range allRecords {
+        tags := parseRouteTags(r.RouteTags) // "province=上海;isp=电信" → map
+        e := ipMap[r.Value]
+        if e == nil {
+            e = &ipEntry{rec: r}
+            ipMap[r.Value] = e
+        }
+        
+        // 累积匹配标志
+        if tags["province"] == province { e.matchProvince = true }
+        if tags["isp"] == isp { e.matchISP = true }
+        if tags["country"] == country { e.matchCountry = true }
+        if tags["province"] == province && tags["isp"] == isp { e.matchProvinceISP = true }
+        if r.RouteTags == "" { e.isDefault = true }
+    }
+    
+    // 按优先级层级筛选
+    return selectByTier(ipMap)
 }
-
-// Query 返回 clientIP 对应的 IP 组；未命中任何节点时返回 nil（调用方用默认权重）
-func (g *GeoRouter) Query(fqdn string, qtype uint16, clientIP net.IP) []*iface.Record
 ```
+
+### 4.3 优先级层级
+
+| 层级 | 条件 | 示例 |
+|------|------|------|
+| 1. provinceISP | matchProvinceISP = true | 上海 + 电信 |
+| 2. province | matchProvince = true | 上海 |
+| 3. isp | matchISP = true | 电信 |
+| 4. country | matchCountry = true | 中国 |
+| 5. default | isDefault = true | `route_tags = ""` |
+| 6. all | — | 无任何标签也返回所有记录 |
+
+返回**第一个非空层级**的所有 IP。
 
 ### 4.4 路由配置格式
 
-在 PG 的 `routes` 表（新增）或记录的 `route_tags` JSON 字段中配置，格式建议：
+记录的 `route_tags` 字段（存储格式）：
 
 ```
-country=中国;isp=电信;province=上海
-country=中国;isp=联通
+province=上海;isp=电信
+province=北京
+isp=联通
 country=中国
-default
 ```
 
-GoEdge 调 `GetRoutes` 时，dns-edge 从字典树的所有叶节点反向生成 `{name, code}` 列表返回。
+`route_tags` 为空字符串表示默认路由（全局兜底）。
+
+GoEdge 的 `nsRouteCodes`（传入格式）：
+
+```
+["province:上海", "isp:电信"]  → 转换为 "province=上海;isp=电信"
+["province:北京"]               → 转换为 "province=北京"
+[]                              → 转换为 ""（默认路由）
+```
+
+转换函数 `nsRouteCodesToTags` 和 `nsRouteTagsToCodes` 双向互转。
 
 ---
 
@@ -107,19 +138,20 @@ GoEdge 调 `GetRoutes` 时，dns-edge 从字典树的所有叶节点反向生成
 ```
 ServeDNS()
   │
-  ├─ 提取 ECS clientIP（已有，Phase 6 EDNS0 已实现）
+  ├─ 提取 ECS clientIP（EDNS0 OPT RR 中解析）
   │
-  ├─ if clientIP != nil && GeoRouter != nil
-  │    └─ geoRouter.Query(name, qtype, clientIP)
-  │         └─ xdb 查 IP → 解析 country/isp/province/city
-  │         └─ 字典树从细到粗匹配
-  │         └─ 找到 records → 加权随机返回
+  ├─ if clientIP != nil
+  │    └─ WeightProvider.GetWeights(fqdn, qtype, clientIP)
+  │         └─ xdb 查 clientIP → parseRegion → province/isp/country
+  │         └─ filterByGeo(allRecords, province, isp, country)
+  │              └─ flat map 聚合 → 按 tier 筛选 IP 组
+  │         └─ 在命中 IP 组内加权随机选一条返回
   │
-  └─ else
-       └─ 现有 WeightProvider 逻辑（纯权重随机）
+  └─ else（clientIP == nil，不带 ECS 的请求）
+       └─ 现有 WeightProvider 逻辑（纯权重随机，忽略 route_tags）
 ```
 
-GeoRouter 实现 `WeightProvider` 接口的扩展版，或作为独立的 `GeoWeightProvider`，在 `CompositeWeightProvider` 中优先级最高。
+`WeightProvider.GetWeights` 签名：`(fqdn string, qtype uint16, clientIP net.IP) map[string]int`，`clientIP` 为 nil 时退化为纯权重模式。
 
 ---
 
@@ -157,24 +189,13 @@ dns-edge {
 
 ---
 
-## 8. 开发阶段规划
+## 8. 开发阶段总结
 
-| 阶段 | 内容 | 预估 |
+| 阶段 | 内容 | 状态 |
 |------|------|------|
-| P1 | `internal/geo/` 包：xdb 封装 + `GeoRouter` 字典树实现 | 1.5 天 |
-| P2 | Corefile `geo` 块解析 + xdb 启动加载 | 0.5 天 |
-| P3 | `ServeDNS` 集成：ECS clientIP → GeoRouter → 加权随机 | 0.5 天 |
-| P4 | PG `routes` 表 or 记录 `route_tags` 字段（存地理路由规则） | 0.5 天 |
-| P5 | 单元测试（字典树 fallback 逻辑、ECS 集成） | 1 天 |
-
-总计约 **4 天**。
-
----
-
-## 9. 待确认事项
-
-1. **路由规则存在哪**：记录级别的 `route_tags` 字段（灵活但复杂），还是单独一张 `routes` 表（清晰但多一次查询）？
-2. **城市粒度**：是否需要到城市级别？ip2region 的城市数据覆盖率参差不齐，省份级别通常已够用。
-3. **xdb 版本更新**：ip2region 数据会定期更新，是否需要热更新机制（运行时替换 xdb），还是重启节点即可？
-4. **多国支持**：目前设计以中国运营商为主，国际节点是否只需要按国家路由？
-5. **GoEdge GetRoutes 接口**：地理路由启用后，`GetRoutes` 返回的线路列表需要包含所有配置的 route tag，GoEdge 管理员才能在控制台选线路。需要确认 GoEdge 如何展示和使用这些线路。
+| P1 | `internal/geo/` 包：xdb 封装 + `parseRegion`（兼容 4/5 字段） | ✅ 已完成 |
+| P2 | Corefile `geo` 块解析 + xdb 启动加载（VectorIndex 模式） | ✅ 已完成 |
+| P3 | `ServeDNS` 集成：ECS clientIP → filterByGeo → 加权随机 | ✅ 已完成 |
+| P4 | `Record.RouteTags` 字段 + `nsRouteCodesToTags`/`nsRouteTagsToCodes` 双向转换 | ✅ 已完成 |
+| P5 | 单元测试（filterByGeo tier 优先级、ECS 集成、xdb 解析） | ✅ 已完成 |
+| P6 | xdb 自动更新（GitHub Releases 定期拉取 + atomic 热替换） | ✅ 已完成 |

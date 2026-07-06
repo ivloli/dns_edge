@@ -308,7 +308,7 @@ dig @127.0.0.1 -p 5300 www.example.com. A +tcp
 curl -s http://localhost:8080/healthz
 ```
 
-**预期**：`HTTP 200`，响应体 `{"status":"ok"}`
+**预期**：`HTTP 200`，响应体 `{"status":"ok","zoneCount":N}`
 
 ### 5.2 Prometheus 指标
 
@@ -517,7 +517,7 @@ curl -o /dev/null -sw '%{http_code}' http://localhost:8080/healthz
 
 # 响应体
 curl -s http://localhost:8080/healthz | jq .
-# 预期: {"status":"ok"}
+# 预期: {"status":"ok","zoneCount":N}
 ```
 
 ---

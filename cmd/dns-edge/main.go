@@ -15,6 +15,7 @@ import (
 	"dns-edge/config"
 	"dns-edge/internal/api"
 	dnshandler "dns-edge/internal/dns"
+	"dns-edge/internal/edgeagent"
 	"dns-edge/internal/geo"
 	"dns-edge/internal/iface"
 	"dns-edge/internal/pg"
@@ -150,6 +151,22 @@ func main() {
 	}
 	if geoUpdater != nil {
 		go geoUpdater.Start(ctx)
+	}
+
+	// edgeagent: poll edgeapi for NS tasks (nsConfigChanged / nsDomainChanged / nsRecordChanged)
+	if cfg.EdgeAgent.Endpoint != "" {
+		agent := edgeagent.New(
+			cfg.EdgeAgent.Endpoint,
+			cfg.EdgeAgent.UniqueID,
+			cfg.EdgeAgent.Secret,
+			zoneStore,
+			log,
+		)
+		go agent.Run(ctx)
+		log.Info("edgeagent started",
+			zap.String("endpoint", cfg.EdgeAgent.Endpoint),
+			zap.String("uniqueId", cfg.EdgeAgent.UniqueID),
+		)
 	}
 
 	udpSrv := &mdns.Server{Net: "udp", Addr: cfg.Listen, Handler: mux}
