@@ -230,6 +230,7 @@
   }
   .badge-green { background: #dcffe4; color: #1a7f37; }
   .badge-blue  { background: #ddf4ff; color: #0550ae; }
+  .badge-red   { background: #ffdce0; color: #b31d28; }
   /* hr */
   hr { border: none; border-top: 1px solid #e1e4e8; margin: 32px 0; }
 </style>
@@ -241,21 +242,20 @@
 <nav>
   <div class="nav-title">部署指南</div>
   <a href="#requirements">环境要求</a>
-  <a href="#structure">目录结构</a>
+  <a href="#structure">目录结构 &amp; 分支</a>
   <a href="#mysql">一、MySQL 初始化</a>
-  <a href="#edgeapi">二、编译 edgeapi</a>
-  <a href="#edgeadmin" class="sub">三、编译 edgeadmin</a>
-  <a href="#dns-edge" class="sub">四、编译 dns-edge</a>
-  <a href="#goedge-config">五、配置 edgeDNSAPI</a>
-  <a href="#verify">六、验证</a>
-  <a href="#systemd">七、systemd 守护</a>
-  <a href="#faq">八、常见问题</a>
+  <a href="#way1">方式一：本机一键部署</a>
+  <a href="#way2">方式二：打包到全新机器</a>
+  <a href="#configs">二、配置文件</a>
+  <a href="#verify">三、验证</a>
+  <a href="#systemd">四、systemd 守护</a>
+  <a href="#faq">五、常见问题</a>
 </nav>
 
 <!-- Main -->
 <main>
   <h1>部署指南：GoEdge + dns-edge</h1>
-  <p class="subtitle">从零开始在新机器上部署 edgeapi + edgeadmin + dns-edge 完整联调环境</p>
+  <p class="subtitle">部署 edgeapi + edgeadmin + dns-edge（含 NS/智能DNS 模块）完整联调环境。2026-07-06 起四个仓库统一迁移到 <code>feature/ns-dns-edge</code> 分支，本文按该分支状态编写。</p>
 
   <!-- Requirements -->
   <h2 id="requirements">环境要求</h2>
@@ -266,30 +266,43 @@
       <div style="color:#6a737d;font-size:12px;margin-top:4px">Ubuntu 22.04 / Amazon Linux 2 已验证</div>
     </div>
     <div class="req-item">
-      <div class="req-name">Go</div>
-      <div class="req-ver">1.21+</div>
-      <div style="color:#6a737d;font-size:12px;margin-top:4px">编译用，运行时不需要</div>
-    </div>
-    <div class="req-item">
       <div class="req-name">MySQL</div>
       <div class="req-ver">8.0+</div>
     </div>
     <div class="req-item">
-      <div class="req-name">git</div>
-      <div class="req-ver">任意版本</div>
+      <div class="req-name">ip2region.xdb</div>
+      <div class="req-ver">可选</div>
+      <div style="color:#6a737d;font-size:12px;margin-top:4px">geo 路由用</div>
     </div>
+  </div>
+  <div class="note">
+    <strong>两种部署方式，依赖不同</strong>
+    本机/开发机需要 Go 1.21+ 工具链 <strong>+ 对 gitlab.gainetics.io 私有仓库的访问权限</strong>（edgeapi/edgeadmin 依赖公司私有 edgecommon fork，走本地 <code>replace</code> 路径依赖，不走公共 Go module proxy）。全新目标机器什么都不需要，直接用编译好的 tarball，见「方式二」。
   </div>
 
   <!-- Structure -->
-  <h2 id="structure">目录结构约定</h2>
+  <h2 id="structure">目录结构约定 &amp; 分支</h2>
+  <p>本机编译时四个仓库必须按这个相对布局摆放：</p>
   <div class="dir-tree">
     <span class="dir">/home/&lt;user&gt;/Git_repo/</span><br>
+    ├── <span class="dir">edgecommon/</span>      <span class="comment"># 公司私有 EdgeCommon fork（走本地 replace 依赖）</span><br>
     ├── <span class="dir">edgeapi/</span>         <span class="comment"># GoEdge API 节点</span><br>
-    ├── <span class="dir">edgeadmin/</span>       <span class="comment"># GoEdge 管理后台</span><br>
-    ├── <span class="dir">edgecommon/</span>      <span class="comment"># 公共库（edgeadmin 依赖）</span><br>
-    └── <span class="link">EdgeCommon -&gt; edgecommon</span>  <span class="comment"># 软链接（go.mod replace 需要）</span><br>
+    └── <span class="dir">edgeadmin/</span>       <span class="comment"># GoEdge 管理后台</span><br>
     <br>
-    <span class="dir">/home/&lt;user&gt;/dns_dev/</span>    <span class="comment"># dns-edge 项目</span>
+    <span class="dir">/home/&lt;user&gt;/dns_dev/</span>    <span class="comment"># dns-edge 项目（独立仓库，不依赖 edgecommon）</span>
+  </div>
+
+  <div class="warn">
+    <strong>不要用公共版 EdgeCommon</strong>
+    <code>edgecommon</code> 必须和 <code>edgeapi</code>/<code>edgeadmin</code> 平级（<code>../edgecommon</code> 相对路径 <code>replace</code>）。<strong>不要</strong>把这个依赖换成 <code>github.com/TeaOSLab/EdgeCommon</code>（公共 proxy.golang.org 能下载到的开源公版）——同名但内容不同，缺公司私有定制字段，换了会悄悄丢功能且编译期不一定报错。详见文末「常见问题」。
+  </div>
+
+  <p>四个仓库都要切到同一个分支：</p>
+  <div style="position:relative">
+    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>cd /home/&lt;user&gt;/Git_repo/edgecommon  &amp;&amp; git checkout feature/ns-dns-edge
+cd /home/&lt;user&gt;/Git_repo/edgeapi     &amp;&amp; git checkout feature/ns-dns-edge
+cd /home/&lt;user&gt;/Git_repo/edgeadmin   &amp;&amp; git checkout feature/ns-dns-edge
+cd /home/&lt;user&gt;/dns_dev              &amp;&amp; git checkout feature/ns-dns-edge</code></pre>
   </div>
 
   <hr>
@@ -303,71 +316,104 @@ CREATE DATABASE IF NOT EXISTS db_edge
   COLLATE utf8mb4_unicode_ci;
 SQL</code></pre>
   </div>
+  <p>edgeapi 首次启动会自动建表（含 NS 相关的 <code>edgeNS*</code> 表），不需要手动建表。</p>
 
   <hr>
 
-  <!-- edgeapi -->
-  <h2 id="edgeapi">二、编译 edgeapi</h2>
+  <!-- Way 1 -->
+  <h2 id="way1">方式一：本机一键部署 <span class="badge badge-green">推荐用于开发/联调机</span></h2>
+  <p>四个仓库都按上面「目录结构约定」clone 好、切到 <code>feature/ns-dns-edge</code> 后：</p>
   <div style="position:relative">
-    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>cd /home/&lt;user&gt;/Git_repo/edgeapi
-mkdir -p build
-go build -o build/edge-api ./cmd/edge-api/</code></pre>
+    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>cd /home/&lt;user&gt;/dns_dev
+./scripts/deploy-test-env.sh</code></pre>
   </div>
 
-  <h3>配置文件</h3>
-  <p>配置放在 <code>configs/</code>（和 <code>build/</code> 同级，Tea.Root 会自动找到）：</p>
-
-  <p><strong>configs/.db.yaml</strong>（edgeapi 实际读取的数据库配置）</p>
-  <div style="position:relative">
-    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>default:
-  driver: mysql
-  dsn: "root:你的密码@tcp(127.0.0.1:3306)/db_edge?charset=utf8mb4&amp;parseTime=True"</code></pre>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body"><p>检查 Go 工具链、MySQL 连通性（默认 <code>127.0.0.1:3306</code> <code>root</code>/<code>123456</code> <code>db_edge</code>，可用 <code>MYSQL_HOST</code>/<code>MYSQL_PORT</code>/<code>MYSQL_USER</code>/<code>MYSQL_PASSWORD</code>/<code>MYSQL_DATABASE</code> 环境变量覆盖）、<code>ip2region.xdb</code> 是否存在（默认 <code>/home/ivloli/edge/static/ip2region.xdb</code>，可用 <code>IP2REGION_XDB</code> 覆盖）</p></div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body"><p>确认四个仓库都在 <code>feature/ns-dns-edge</code> 分支——不对会直接报错退出，<strong>不会</strong>替你切分支</p></div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body"><p>按依赖顺序 <code>edgeapi → edgeadmin → dns-edge</code> 依次执行各仓库自己的 <code>make deploy-local</code></p></div>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body"><p>跑一遍烟测：<code>healthz</code>、<code>dig test.local A</code>、edgeadmin 首页可达</p></div>
+    </div>
   </div>
 
-  <p><strong>configs/db.yaml</strong>（旧格式兼容，两个都要建）</p>
+  <div class="note"><strong>首次运行前</strong>三个服务各自的配置文件需要手动准备好（真实凭证从不入库，见「二、配置文件」）。配置放好之后，之后重复运行这个脚本就是纯粹的"重新编译+重启+验证"。</div>
+
+  <h3>本地进程管理（<code>make</code> 系列命令）</h3>
+  <p><code>edgeapi</code>、<code>edgeadmin</code>、<code>dns-edge</code> 三个仓库都有 Makefile，提供一套不需要 <code>sudo</code>/<code>systemd</code> 的本地进程管理（这台机器如果没有免密 sudo，systemd 装不上，才需要这套）：</p>
+  <table>
+    <tr><th>命令</th><th>作用</th></tr>
+    <tr><td><code>make build</code></td><td>编译（edgeadmin 是 <code>CGO_ENABLED=0 go build</code>）</td></tr>
+    <tr><td><code>make run-local</code></td><td>编译并启动（已在运行则跳过），PID 写到 <code>.run/&lt;name&gt;.pid</code></td></tr>
+    <tr><td><code>make stop-local</code></td><td>按 PID 文件停止</td></tr>
+    <tr><td><code>make restart-local</code></td><td>stop + run</td></tr>
+    <tr><td><code>make deploy-local</code></td><td>restart + 健康检查</td></tr>
+    <tr><td><code>make status-local</code></td><td>查进程是否存活</td></tr>
+  </table>
+  <p>单独管理某个服务时直接在对应仓库目录下跑这些命令即可，不需要走整个 <code>deploy-test-env.sh</code>。</p>
+
+  <hr>
+
+  <!-- Way 2 -->
+  <h2 id="way2">方式二：打包部署到全新机器</h2>
+  <p>全新机器不需要 Go 工具链、不需要私有仓库访问权限——编译这一步已经在「方式一」的开发机上完成，产出的是纯二进制。</p>
+
+  <h3>在已经配置好依赖的机器上打包</h3>
+  <div style="position:relative">
+    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>cd /home/&lt;user&gt;/dns_dev
+./scripts/package-release.sh</code></pre>
+  </div>
+  <p>产出 <code>release-artifacts/&lt;时间戳&gt;/</code> 目录，包含三个 tarball（<code>edge-api-test-env.tar.gz</code>、<code>edge-admin-test-env.tar.gz</code>、<code>dns-edge-linux-amd64-&lt;tag&gt;.tar.gz</code>）和一份 <code>README.txt</code>。把这个目录整体 <code>scp</code>/<code>rsync</code> 到目标机器。</p>
+
+  <h3>在目标机器上（对每个 tarball 重复）</h3>
+  <div style="position:relative">
+    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>mkdir -p /opt/&lt;service&gt; &amp;&amp; tar -xzf &lt;name&gt;.tar.gz -C /opt/&lt;service&gt;
+cd /opt/&lt;service&gt;/configs
+cp X.template.yaml X.yaml   # 每个 .template.yaml 都要复制成同名去掉 template 的文件
+vim X.yaml                  # 填真实的数据库密码/nodeId/secret等
+cd ..
+nohup ./&lt;binary&gt; &gt; run.log 2&gt;&amp;1 &amp;</code></pre>
+  </div>
+  <div class="warn"><strong>启动顺序</strong>edgeapi 先起（edgeadmin 和 dns-edge 的 edgeagent 都要连它的 gRPC :8031），然后 edgeadmin、dns-edge 顺序不限。MySQL 和 <code>ip2region.xdb</code> 不在打包范围内，目标机器要自己准备。</div>
+
+  <hr>
+
+  <!-- Configs -->
+  <h2 id="configs">二、配置文件</h2>
+  <p>无论走哪种部署方式，三个服务各自的配置文件都不入库（<code>.gitignore</code> 排除），需要手动准备。模板文件（占位符，可放心参考）：</p>
+  <ul>
+    <li>edgeapi: <code>&lt;edgeapi&gt;/build/configs/api.template.yaml</code>、<code>db.template.yaml</code></li>
+    <li>edgeadmin: <code>&lt;edgeadmin&gt;/build/configs/api_admin.template.yaml</code>、<code>api_db.template.yaml</code>、<code>server.template.yaml</code></li>
+  </ul>
+
+  <h3>edgeapi — configs/db.yaml</h3>
+  <p>和 <code>build/</code> 同级（见下面 Tea.Root 说明）：</p>
   <div style="position:relative">
     <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>host: 127.0.0.1:3306
 database: db_edge
 user: root
-password: "你的密码"
-prefix: edge</code></pre>
+password: "你的密码"</code></pre>
   </div>
+  <div class="note"><strong>提示</strong><code>configs/api.yaml</code> 首次启动后自动生成 <code>nodeId</code>/<code>secret</code>，不需要手动创建；记下这两个值，edgeadmin 那边要用。</div>
 
-  <div class="note"><strong>提示</strong><code>configs/api.yaml</code> 首次启动后自动生成，不需要手动创建。</div>
-
-  <h3>首次启动 edgeapi</h3>
-  <div style="position:relative">
-    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>cd /home/&lt;user&gt;/Git_repo/edgeapi
-./build/edge-api</code></pre>
-  </div>
-  <p>首次启动会自动建表并输出管理节点凭证，<strong>记录以下信息</strong>（edgeadmin 配置需要）：</p>
-  <pre><code>[API_NODE]admin node id: 22d93a9e...
-[API_NODE]admin node secret: pg05i8JW...</code></pre>
-
-  <hr>
-
-  <!-- edgeadmin -->
-  <h2 id="edgeadmin">三、编译 edgeadmin</h2>
-  <div style="position:relative">
-    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>cd /home/&lt;user&gt;/Git_repo
-
-# edgeadmin 的 go.mod 有 replace =&gt; ../EdgeCommon，需要软链接
-ln -s edgecommon EdgeCommon   # 如果 EdgeCommon 不存在
-
-cd edgeadmin
-mkdir -p build
-go build -o build/edge-admin ./cmd/edge-admin/</code></pre>
-  </div>
-
-  <h3>配置文件</h3>
-  <p><strong>configs/api_admin.yaml</strong></p>
+  <h3>edgeadmin — configs/api_admin.yaml</h3>
   <div style="position:relative">
     <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>rpc.endpoints: [ "http://127.0.0.1:8031" ]
-nodeId: "edgeapi 首次启动输出的 adminNodeId"
-secret: "edgeapi 首次启动输出的 adminNodeSecret"</code></pre>
+nodeId: "edgeapi 自动生成的 nodeId"
+secret: "edgeapi 自动生成的 secret"</code></pre>
   </div>
 
-  <p><strong>configs/server.yaml</strong></p>
+  <h3>edgeadmin — configs/server.yaml</h3>
   <div style="position:relative">
     <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>env: prod
 http:
@@ -378,7 +424,7 @@ https:
   </div>
 
   <h3>创建管理员账号</h3>
-  <p>edgeapi 初始化后管理员表为空，需手动插入：</p>
+  <p>首次启动前，<code>edgeAdmins</code> 表为空，手动插入：</p>
   <div style="position:relative">
     <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>mysql -u root -p db_edge &lt;&lt;'SQL'
 INSERT INTO edgeAdmins
@@ -387,27 +433,9 @@ VALUES
   ('admin', MD5('admin'), '管理员', 1, 1, 1, UNIX_TIMESTAMP());
 SQL</code></pre>
   </div>
-  <div class="warn"><strong>生产环境</strong>将 <code>MD5('admin')</code> 换成 <code>MD5('强密码')</code>。</div>
+  <div class="warn"><strong>生产环境</strong>务必将 <code>MD5('admin')</code> 换成 <code>MD5('强密码')</code>。</div>
 
-  <h3>启动 edgeadmin</h3>
-  <div style="position:relative">
-    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>cd /home/&lt;user&gt;/Git_repo/edgeadmin
-mkdir -p logs
-./build/edge-admin &gt;&gt; logs/run.log 2&gt;&amp;1 &amp;</code></pre>
-  </div>
-  <p>访问 <code>http://&lt;ip&gt;:7788</code>，使用 <code>admin</code> / <code>admin</code> 登录。</p>
-
-  <hr>
-
-  <!-- dns-edge -->
-  <h2 id="dns-edge">四、编译 dns-edge</h2>
-  <div style="position:relative">
-    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>cd /home/&lt;user&gt;/dns_dev
-go build -o /usr/local/bin/dns-edge ./cmd/dns-edge/</code></pre>
-  </div>
-
-  <h3>配置文件 — Corefile.local</h3>
-  <p>无 PG 模式，GoEdge 通过 edgeDNSAPI 管理记录：</p>
+  <h3>dns-edge — Corefile.local</h3>
   <div style="position:relative">
     <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>dns-edge {
     listen  :5300
@@ -416,7 +444,6 @@ go build -o /usr/local/bin/dns-edge ./cmd/dns-edge/</code></pre>
 
     api {
         listen :8080
-
         edgedns_access_key_id     your-key-id
         edgedns_access_key_secret your-key-secret
     }
@@ -427,68 +454,47 @@ go build -o /usr/local/bin/dns-edge ./cmd/dns-edge/</code></pre>
         ratelimit 100
     }
 
-    # 地理路由（可选）
+    # NS 模式：连 edgeapi 的 gRPC，10s 轮询任务、同步 NSDomain/NSRecord
+    edgeagent {
+        endpoint  127.0.0.1:8031
+        unique_id &lt;edgeapi 里对应 NSNode 的 uniqueId&gt;
+        secret    &lt;同一条 NSNode 记录的 secret&gt;
+    }
+
+    # 地理路由（可选，CDN 模式用）
     geo {
         xdb             /path/to/ip2region.xdb
-        auto_update     true      # 自动从 GitHub 拉取最新 xdb
+        auto_update     true
         update_interval 24h
-        # github_token  ghp_xxx   # 可选，避免 API 限频
     }
 }</code></pre>
   </div>
-  <div class="note"><strong>注意</strong><code>edgedns_access_key_id</code> / <code>secret</code> 自定义，需与 EdgeAdmin DNS 服务商配置一致。<code>geo</code> 块可省略，省略后不启用地理路由。</div>
-
-  <h3>启动 dns-edge</h3>
-  <div style="position:relative">
-    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>nohup dns-edge -config Corefile.local &gt;&gt; /var/log/dns-edge.log 2&gt;&amp;1 &amp;</code></pre>
+  <div class="note">
+    <strong>两种模式可以只开一个也可以两个都开</strong>
+    <strong>CDN 模式</strong>（<code>api</code> 块）：edgeapi 通过 edgeDNSAPI 主动推送 CDN 记录，不需要 <code>edgeagent</code> 块。<strong>NS 模式</strong>（<code>edgeagent</code> 块）：dns-edge 主动拉取 NS 域名/记录，需要先在 EdgeAdmin「智能DNS」里建好集群和节点，拿到节点的 <code>uniqueId</code>/<code>secret</code>。
   </div>
-
-  <hr>
-
-  <!-- GoEdge config -->
-  <h2 id="goedge-config">五、在 GoEdge 配置 edgeDNSAPI Provider</h2>
-
-  <h3>5.1 添加 DNS 服务商</h3>
-  <p>登录 EdgeAdmin → <strong>DNS 管理</strong> → <strong>DNS 服务商</strong> → 新建：</p>
-  <table>
-    <tr><th>字段</th><th>值</th></tr>
-    <tr><td>名称</td><td>任意，如 <code>dns-edge-01</code></td></tr>
-    <tr><td>类型</td><td><code>EdgeDNS API</code></td></tr>
-    <tr><td>Host</td><td><code>http://&lt;dns-edge-ip&gt;:8080</code></td></tr>
-    <tr><td>Access Key ID</td><td>和 Corefile 里 <code>edgedns_access_key_id</code> 一致</td></tr>
-    <tr><td>Access Key Secret</td><td>和 Corefile 里 <code>edgedns_access_key_secret</code> 一致</td></tr>
-  </table>
-
-  <h3>5.2 添加 DNS 域名</h3>
-  <p>进入刚建的服务商 → <strong>新建域名</strong>，填写要管理的域名（如 <code>example.com</code>）。</p>
-
-  <h3>5.3 绑定 CDN 集群</h3>
-  <p>EdgeAdmin → <strong>节点管理</strong> → <strong>集群</strong> → 选集群 → <strong>DNS</strong> 标签页：</p>
-  <ul>
-    <li>选择 DNS 域名</li>
-    <li>填写二级域名前缀（如 <code>node</code>，节点 A 记录会是 <code>node.example.com</code>）</li>
-  </ul>
-
-  <h3>5.4 同步</h3>
-  <p>在 DNS 域名页点「同步」，GoEdge 把集群节点 IP 推送到 dns-edge。</p>
 
   <hr>
 
   <!-- Verify -->
-  <h2 id="verify">六、验证</h2>
+  <h2 id="verify">三、验证</h2>
   <div style="position:relative">
     <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code># DNS 解析
-dig @&lt;dns-edge-ip&gt; -p 5300 &lt;子域名&gt;.&lt;域名&gt; A +short
+dig @&lt;dns-edge-ip&gt; -p 5300 &lt;域名&gt; A +short
 
 # API 健康检查
 curl http://&lt;dns-edge-ip&gt;:8080/healthz
-# → {"status":"ok"}</code></pre>
+# → {"status":"ok","zoneCount":N}
+
+# EdgeAdmin（反爬虫规则会拦截没有 UA 或 UA 是 curl/wget/python 的请求）
+curl -A "Mozilla/5.0" http://&lt;edgeadmin-ip&gt;:7788/</code></pre>
   </div>
 
   <hr>
 
   <!-- systemd -->
-  <h2 id="systemd">七、进程守护（systemd）</h2>
+  <h2 id="systemd">四、生产环境进程守护（systemd）</h2>
+  <p>开发/联调机没有免密 sudo 时用「本地进程管理」（<code>make deploy-local</code> 那套）；真正的生产环境建议走 systemd。</p>
 
   <h3>/etc/systemd/system/edge-api.service</h3>
   <div style="position:relative">
@@ -526,24 +532,12 @@ RestartSec=5s
 WantedBy=multi-user.target</code></pre>
   </div>
 
-  <h3>/etc/systemd/system/dns-edge.service</h3>
+  <h3>dns-edge — <code>make install</code></h3>
+  <p>dns_dev 的 Makefile 已经有对应目标（会生成并启用 systemd unit，路径按 <code>PREFIX ?= /opt/dns-edge</code> 展开），不需要手写 unit 文件：</p>
   <div style="position:relative">
-    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>[Unit]
-Description=dns-edge
-After=network.target
-
-[Service]
-Type=simple
-User=&lt;user&gt;
-WorkingDirectory=/home/&lt;user&gt;/dns_dev
-ExecStart=/usr/local/bin/dns-edge -config Corefile.local
-Restart=on-failure
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target</code></pre>
+    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>cd /home/&lt;user&gt;/dns_dev
+sudo make install   # build + 安装二进制/配置/systemd unit + enable + start</code></pre>
   </div>
-
   <div style="position:relative">
     <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>systemctl daemon-reload
 systemctl enable --now edge-api edge-admin dns-edge</code></pre>
@@ -552,37 +546,39 @@ systemctl enable --now edge-api edge-admin dns-edge</code></pre>
   <hr>
 
   <!-- FAQ -->
-  <h2 id="faq">八、常见问题</h2>
+  <h2 id="faq">五、常见问题</h2>
 
-  <h3>edgeadmin 启动找不到配置</h3>
-  <p><code>Tea.Root</code> 由二进制路径决定：二进制在 <code>build/</code> 子目录，<code>configs/</code> 和 <code>build/</code> 同级才能被找到。</p>
+  <h3>Tea.Root 找不到配置 / 编译产物放哪都报配置缺失</h3>
+  <p><code>Tea.Root</code> 由二进制<strong>真实路径</strong>决定：<code>filepath.Dir(filepath.Dir(可执行文件路径))</code>，和进程当前工作目录（cwd）无关。二进制在 <code>&lt;repo&gt;/build/edge-api</code>，Tea.Root 就是 <code>&lt;repo&gt;</code>，<code>configs/</code> 必须和 <code>build/</code> 同级（<code>&lt;repo&gt;/configs/</code>），不是 <code>build/configs/</code>。</p>
 
-  <h3>edgeadmin 编译失败（找不到 EdgeCommon）</h3>
-  <div style="position:relative">
-    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>ls /home/&lt;user&gt;/Git_repo/EdgeCommon        # 确认软链接存在
-ln -s edgecommon /home/&lt;user&gt;/Git_repo/EdgeCommon  # 不存在时创建</code></pre>
+  <h3>edgeapi/edgeadmin 编译报"找不到某个 gitlab.gainetics.io/.../edgecommon 子包"</h3>
+  <p><code>../edgecommon</code> 目录不存在，或不在正确的相对位置——检查 <code>edgecommon</code> 是否和 <code>edgeapi</code>/<code>edgeadmin</code> 平级、分支是否也是 <code>feature/ns-dns-edge</code>。</p>
+
+  <h3>改了依赖之后突然编译报"缺少某个字段" <span class="badge badge-red">双库陷阱</span></h3>
+  <div class="warn">
+    <strong>八成是走错了公版/私有版</strong>
+    不小心把 <code>gitlab.gainetics.io/backend-cdn/goedge/edgecommon</code> 的 import 路径改成了 <code>github.com/TeaOSLab/EdgeCommon</code>——这两个名字长得像，但后者是从公共 <code>proxy.golang.org</code> 能下载到的<strong>开源公版</strong>，不是公司私有 fork，没有私有定制字段（比如 WAF/CC 相关字段）。判断依据：私有 fork 走本地 <code>replace</code>，<code>go.sum</code> 里<strong>没有</strong>它的真实哈希；公版会被公共 proxy 缓存，<code>go.sum</code> 里能查到正常条目。统一按 <code>gitlab.gainetics.io/backend-cdn/goedge/edge{common,admin}</code> 这条路径来。
   </div>
 
-  <h3>dns-edge 重启后记录丢失 <span class="badge badge-green">自动恢复</span></h3>
+  <h3>edgeadmin 编译报 cgo/C 相关错误</h3>
+  <p>edgeadmin 必须 <code>CGO_ENABLED=0</code> 编译（<code>internal/waf/injectionutils</code> 下有未加 build tag 的 <code>.c</code> 文件）。<code>make build</code>/<code>make deploy-local</code> 已经处理好这一点，不要手动跳过 Makefile 直接跑 <code>go build</code>。</p>
+
+  <h3>dns-edge 重启后 NS 域名解析不出来 / REFUSED <span class="badge badge-green">自动恢复</span></h3>
+  <div class="tip">
+    <strong>正常应该秒恢复</strong>
+    <code>edgeagent</code>（<code>internal/edgeagent/agent.go</code>）在每次连接建立后（含进程刚启动、断线重连）都会无条件做一次全量 domain/record 同步，不需要等 EdgeAdmin 那边有人手动改了什么才触发。
+  </div>
+  <p>如果没恢复，先看 dns-edge 日志里 <code>edgeagent: connected to edgeapi</code>/<code>(re)established</code> 有没有打出来，没有说明 gRPC 连接本身有问题（检查 <code>edgeagent.endpoint</code>/<code>unique_id</code>/<code>secret</code> 是否正确）。</p>
+
+  <h3>dns-edge 重启后 CDN 模式记录丢失 <span class="badge badge-green">自动恢复</span></h3>
   <div class="tip">
     <strong>无需手动操作</strong>
     edgeapi 的 <code>DNSTaskExecutor</code> 每 20 秒检测一次 dns-edge 的 domain 列表，发现为空时自动触发重推。实测重启后 <strong>5 秒到 20 秒内</strong>记录自动恢复。
   </div>
   <p>如果等待超过 1 分钟仍未恢复，可手动在 EdgeAdmin DNS 域名页点「同步」强制触发。</p>
 
-  <h3>geo 路由记录没有按线路分流</h3>
-  <p>检查两点：</p>
-  <ul>
-    <li>客户端 DNS 查询是否携带 ECS（<code>+subnet=</code>），不带 ECS 时 <code>clientIP</code> 为 nil，从所有记录随机选</li>
-    <li>记录的 <code>nsRouteCodes</code> 里省份名要和 ip2region 归一化后的名字一致，如 <code>province:浙江</code>（不带「省」字）</li>
-  </ul>
-
-  <h3>dig 返回空 / NXDOMAIN</h3>
-  <p>先确认 dns-edge 健康，再触发 EdgeAdmin 同步：</p>
-  <div style="position:relative">
-    <pre><button class="copy-btn" onclick="copyCode(this)">复制</button><code>curl http://&lt;dns-edge-ip&gt;:8080/healthz
-# 然后 EdgeAdmin → DNS 服务商 → 域名 → 同步</code></pre>
-  </div>
+  <h3><code>curl</code> 测试 EdgeAdmin 被 403</h3>
+  <p>反爬虫规则会拦截 UA 命中 <code>curl</code>/<code>wget</code>/<code>python</code> 的请求，测试时带上 <code>-A "Mozilla/5.0"</code>。登录表单的 CSRF token 不是服务端直接渲染的，是先 <code>GET /csrf/token</code> 异步拿到（单次消费、30 分钟有效），完整的 curl 自动化登录流程见 <code>findings.md</code>。</p>
 
 </main>
 </div>
