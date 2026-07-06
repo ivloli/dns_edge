@@ -1,5 +1,21 @@
 # 会话日志
 
+## 2026-07-06
+
+### 把 NS/DNS 整套改动迁移到 test 环境分支（4 个仓库）
+
+用户要求把这几天在 dns_dev/edgeapi/edgeadmin 的 NS 改动挪到团队的 `test` 环境分支，出 Makefile + 一键部署脚本。排查过程中发现 `edgeadmin` 的 NS 代码依赖 `edgecommon` 仓库自己新加的 pb 类型，实际要迁移的是 **4 个仓库**（多了 edgecommon）。
+
+**踩的坑（关键）**：`test` 分支所在的团队主线在我们的 feature 分支分叉之后做过一次模块改名——`test` 用 `gitlab.gainetics.io/backend-cdn/goedge/edgecommon`（`replace ../edgecommon` 指向本地私有 fork），我们的 feature 分支用 `github.com/TeaOSLab/EdgeCommon`（一个从公共 proxy.golang.org 能下载到的**开源公版**）。`git merge` 时自动收敛到了公版命名，编译时才暴露问题——同事在 `test` 分支给 WAF 黑白名单加的 `HTTPAccessLog.FirewallListId`/`FirewallListType` 字段公版里没有。用户两次打断确认"是不是把同事工作覆盖了"，核实后改为让 edgecommon 仓库自身的模块名/内部 121 处 import 路径统一改回 `gitlab.gainetics.io/...`（纯路径重命名，不改逻辑），edgeapi（244 处）/edgeadmin（31 处）里同名的引用一并改回来，而不是反过来动 test 那边。
+
+**分支**：4 个仓库统一建 `feature/ns-dns-edge`——edgecommon/edgeapi/edgeadmin 从 `origin/test` 拉出（edgeapi 是真 merge + 1 处无关小冲突；edgeadmin 是 `main` 从未提交过 NS 代码，直接从 test 分支重新应用），dns_dev 从 `master` 拉出（fast-forward，无冲突）。过程中还发现 edgeapi 有一批 NS service（`service_ns.go`/`service_ns_cluster.go` 等 7 个文件 + 3 个 DAO + installer）一直只在 `git stash` 里没提交，忘了 pop 差点当成"合并已完成"——git stash 没丢东西，补 pop 后修好 import 路径重新提交。
+
+**Makefile + 部署脚本**：三个仓库（edgeapi/edgeadmin/dns-edge）各自 Makefile 加了 `build`/`run-local`/`stop-local`/`restart-local`/`deploy-local`/`status-local`（PID 文件+nohup，这台机器没有免密 sudo 跑不了 systemd）+ `package`（打包成二进制+配置模板的 tarball，不含真实凭证）。`dns_dev/scripts/deploy-test-env.sh`（本机一键部署，依赖检查+分支检查+按 edgeapi→edgeadmin→dns-edge 顺序部署+烟测）和 `scripts/package-release.sh`（打包三个 tarball，供拷到全新机器——用户后来明确要部署到全新机器，讨论后选打包而非源码编译，因为源码编译要在新机器上重建今天踩的这堆本地依赖坑）都已经端到端跑通验证。
+
+**最终核对**：三个依赖 edgecommon 的仓库（edgecommon 自己/edgeapi/edgeadmin）的模块命名、`go.mod` 依赖声明都已经和 `origin/test` 逐项比对一致，`go build`/`CGO_ENABLED=0 go build` 全部干净，四个仓库都没有推送到远程。
+
+---
+
 ## 2026-07-03
 
 ### edgeagent 重连机制补齐（P10）
