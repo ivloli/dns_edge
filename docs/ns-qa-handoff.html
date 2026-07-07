@@ -242,8 +242,8 @@ dig @&lt;admin机器IP&gt; -p 5300 &lt;dnsName&gt;.&lt;主域名&gt; A +short</p
 <div class="expected">域名创建成功，列表能看到，且能看到它绑定的集群</div>
 
 <div class="step-title"><span class="step-num">3</span><h3>线路管理</h3></div>
-<p><span class="menu-path">智能DNS → 线路管理</span>，查看内置线路（国家/省份/运营商），也可以尝试添加自定义线路</p>
-<div class="expected">内置线路列表能看到（如果是空的，找 ivloli 确认是否需要先插入种子数据）</div>
+<p><span class="menu-path">智能DNS → 线路管理</span>，查看内置线路（国家/省份/运营商），也可以尝试<span class="menu-path">添加线路</span>——弹窗里选"匹配类型"（国家/省份/运营商）+ 填具体值（比如省份填"浙江"，不带"省"字）</p>
+<div class="expected">内置线路列表能看到（如果是空的，找 ivloli 确认是否需要先插入种子数据）；自定义线路选了匹配类型并保存后，能在记录弹窗的线路多选列表里看到这条自定义线路，跟内置线路一样可选、可参与 ECS 精确匹配</div>
 
 <div class="step-title"><span class="step-num">4</span><h3>记录管理 — 基本增删改查</h3></div>
 <p>进入域名详情，添加几种不同类型的记录：</p>
@@ -280,22 +280,45 @@ dig @&lt;admin机器IP&gt; -p 5300 test.&lt;域名&gt; A +subnet=8.8.8.0 +short<
 <div class="expected">
   精确匹配时稳定返回对应记录（不是随机的）；无 ECS / 境外 IP 时两条记录交替出现，不出错
 </div>
-<div class="note">只支持内置线路（国家/省份/运营商），自定义 IP 段 / CIDR / 自定义地域线路暂不支持匹配。</div>
+<div class="note">支持内置线路和自定义线路（都限定为国家/省份/运营商三类，靠"匹配代号"生效）；自定义 IP 段 / CIDR / 自定义地域组合线路暂不支持匹配。</div>
 
-<div class="step-title"><span class="step-num">6</span><h3>通配符记录</h3></div>
+<div class="step-title"><span class="step-num">6</span><h3>自定义线路（本机已验证通过，2026-07-07）</h3></div>
+<p><span class="menu-path">智能DNS → 线路管理 → 添加线路</span>，"匹配类型"选<strong>省份</strong>，值填 <code>浙江</code>（不带"省"字），保存</p>
+<div class="expected">保存成功，列表"匹配代号"列显示 <code>province:浙江</code></div>
+<p>回到域名详情，给同一个记录名（比如 <code>zjtest</code>）建两条 A 记录：</p>
+<ul>
+  <li>记录1：值 <code>6.6.6.6</code>，线路勾选刚建的"省份-浙江"自定义线路</li>
+  <li>记录2：值 <code>7.7.7.7</code>，不勾任何线路（作为兜底/默认）</li>
+</ul>
+<pre>
+<span class="comment"># 浙江电信测试IP，应该精确命中记录1</span>
+dig @&lt;admin机器IP&gt; -p 5300 zjtest.&lt;域名&gt; A +subnet=122.228.0.1 +short
+
+<span class="comment"># 上海联通测试IP（不匹配浙江），应该兜底命中记录2（没勾线路的那条）</span>
+dig @&lt;admin机器IP&gt; -p 5300 zjtest.&lt;域名&gt; A +subnet=210.22.70.1 +short
+
+<span class="comment"># 不带 ECS，两条都是候选，应该随机</span>
+for i in 1 2 3 4 5 6; do dig @&lt;admin机器IP&gt; -p 5300 zjtest.&lt;域名&gt; A +short; done</pre>
+<div class="expected">
+  浙江电信 IP 稳定返回 6.6.6.6；上海联通 IP 稳定返回 7.7.7.7（不是随机的——因为它落在"兜底/默认线路"这一档，不是"从所有记录里随机选"）；无 ECS 时两条交替出现
+</div>
+<div class="note"><strong>"兜底"的含义</strong>：指记录没有勾选任何线路（<code>RouteTags</code> 为空）。降级链路是"省份+运营商 &gt; 省份 &gt; 运营商 &gt; 国家 &gt; 没勾线路的记录 &gt; 兜底用全部记录"——只要这条记录名下存在"没勾线路"的记录，客户端地理不匹配任何具体线路时就优先用它，而不是把打了地理标签、本来只想给特定地区用的记录也混进来瞎选。想让某个记录名对任何访客都有兜底效果，必须显式建一条不勾线路的记录。</div>
+<div class="note"><strong>已知踩坑</strong>：如果记录名下<strong>只有一条</strong>候选记录，无论 ECS 是什么都会直接返回这条记录（没有可选的候选时不会走地理匹配）——测试时至少要建两条记录才能看出降级效果。</div>
+
+<div class="step-title"><span class="step-num">7</span><h3>通配符记录</h3></div>
 <p>给域名加一条名称为 <code>*</code> 的 A 记录</p>
 <pre>dig @&lt;admin机器IP&gt; -p 5300 &lt;随便编的子域名&gt;.&lt;域名&gt; A +short</pre>
 <div class="expected">任意子域名都能命中这条通配符记录解析出来</div>
 
-<div class="step-title"><span class="step-num">7</span><h3>数据看板</h3></div>
+<div class="step-title"><span class="step-num">8</span><h3>数据看板</h3></div>
 <p><span class="menu-path">智能DNS → 数据看板</span></p>
 <div class="expected">能看到近24小时流量统计、域名/节点排行，没有数据时图表不报错、不崩溃</div>
 
-<div class="step-title"><span class="step-num">8</span><h3>全局配置</h3></div>
+<div class="step-title"><span class="step-num">9</span><h3>全局配置</h3></div>
 <p><span class="menu-path">智能DNS → 全局配置</span>，设置默认集群、新用户默认套餐能力</p>
 <div class="expected">保存成功</div>
 
-<div class="step-title"><span class="step-num">9</span><h3>断线重连 / 冷启动同步（需要能操作 dns-edge 进程）</h3></div>
+<div class="step-title"><span class="step-num">10</span><h3>断线重连 / 冷启动同步（需要能操作 dns-edge 进程）</h3></div>
 <p>手动重启一次 dns-edge 进程</p>
 <pre>
 curl -s http://&lt;admin机器IP&gt;:8080/healthz
@@ -317,6 +340,7 @@ dig @&lt;admin机器IP&gt; -p 5300 &lt;域名&gt; A +short</pre>
     <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> 集群/节点/域名创建流程顺畅，无报错</td></tr>
     <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> 各类型记录（A/CNAME/MX/TXT等）增删改查 + dig 验证都正常</td></tr>
     <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> 记录线路多选保存/回显正常，ECS 精确匹配 + 兜底随机都正常</td></tr>
+    <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> 自定义线路（选"匹配类型"+填值）能保存成功，且能被记录选中、参与 ECS 精确匹配</td></tr>
     <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> 通配符记录能命中任意子域名</td></tr>
     <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> 数据看板正常显示，无数据时不崩溃</td></tr>
     <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> dns-edge 重启后自动冷启动同步，无需人工干预</td></tr>

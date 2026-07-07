@@ -389,3 +389,48 @@ TeaGo 的 `Server.Data()/EndData()` 不是栈式作用域：`lastData` 是单一
 2. `edgeadmin/internal/web/actions/default/ns/index.go`：同名 4 个本地变量非 nil 初始化——这是真正生效的修复点。
 
 **验证**：curl 复测 `POST /ns`，`hourlyStats`/`topDomainStats`/`topNodeStats` 从 `null` 变成 `[]`（`len=0`）；`dailyStats` 因为还有真实数据（14天）本来就不受影响。详见 `findings.md`「NS 仪表盘"24小时无数据时坐标系整个消失"」一节。
+
+### 8. NSRoute/NSPlan JSON 空值报库崩溃修复（2026-07-07，用户提测线路管理时触发）
+
+用户按提测文档测线路管理，"添加线路"保存报错：`Error 3140 (22032): Invalid JSON text: "The document is empty."`，列名 `edgeNSRoutes.ranges`。
+
+**根因**：跟更早修过的 `CreateNSCluster` 是同一类 bug——`NSRouteDAO.CreateNSRoute`/`UpdateNSRoute` 把 `op.Ranges = rangesJSON` 写死，"添加线路"表单当时没有任何输入能填充 `rangesJSON`，传过来是 0 长度字节串，MySQL JSON 列拒绝写入空字符串（合法 JSON 空值应该是字面量 `null`，不是空字节串）。顺手排查了同款 DAO（`json.Marshal` 之前赋值、没走 `if len(x) > 0` 守卫的），在 `NSPlanDAO.CreateNSPlan`/`UpdateNSPlan` 的 `op.Config = configJSON` 上发现同一个坑，一并修了。
+
+**修复**：两个 DAO 的对应赋值都加 `if len(x) > 0 { op.Field = x }` 守卫（`ns_route_dao.go`、`ns_plan_dao.go`）。`NSRecordDAO.CreateNSRecord` 的 `routeIds` 没有这个问题，因为它是 `json.Marshal()` 之后再赋值，nil 输入会正确产出 JSON 字面量 `null`。
+
+**验证**：编译通过，部署到本机 + 测试环境（贵州 admin / 新加坡 api）均确认重启成功，用户复测保存线路/套餐不再报错。
+
+### 9. 自定义线路"类型选择器"——让自定义线路真正参与地理匹配（2026-07-07）
+
+**背景**：修完上面的崩溃后发现更深的问题——"线路管理"的"添加线路"表单从来没有任何字段能设置 `code`（`country:`/`province:`/`isp:` 前缀），而 dns-edge 的 NS 拉取路径（`internal/edgeagent/agent.go`）只认 `route.Code != ""` 的线路。也就是说自定义线路能建、能选、能下发，但因为没有 `code`，`RouteTags` 永远是空字符串，等价于"默认线路"，根本不参与 ECS 精确匹配——用户反馈"不生效有啥用呢"。
+
+调研 CDN 模式（域名解析）想看能不能照抄现成方案，结果发现 CDN 模式的线路（`DNSDomainRoute`）压根没有创建入口，只能勾选服务端预置的固定目录（`FindAllDNSDomainRoutes`，无对应 `CreateDNSDomainRoute` RPC）——这条路走不通，因为智能DNS现在内置种子数据只有7条（国家:中国/省份:上海广东北京/运营商:电信移动联通），远不能覆盖全部省份和运营商，照抄"不给创建"会让覆盖不到的场景（比如浙江）永久无法选线路。
+
+**决定**：方案A——给"添加线路"/"修改线路"表单加"匹配类型"下拉框（国家/省份/运营商，留一个"不限定"选项），配一个值输入框，服务端拼成 `code` 字符串（如 `province:浙江`）落库。不支持自定义 IP 段/CIDR/地域组合线路，跟 CDN 模式的实际匹配能力保持一致范围。
+
+**改动**：
+1. `edgecommon/pkg/rpc/protos/service_ns_route.proto`：`CreateNSRouteRequest`/`UpdateNSRouteRequest` 各加一个 `string code` 字段（全新字段号 9/8，不影响老客户端）。**踩坑**：`build.sh` 默认对 `*.proto` 通配符全量重新生成，本机 protoc/protoc-gen-go-grpc 版本比仓库原先用的新，全量重新生成会导致 479 个文件被改写、grpc 插件版本跳跃触发 `grpc.BidiStreamingClient` 编译错误——改成只对 `service_ns_route.proto` 单文件跑 `protoc --go_out`，把改动范围收窄到这一个文件。
+2. `edgeapi`：`NSRouteDAO.CreateNSRoute`/`UpdateNSRoute` 加 `code string` 参数并持久化；`service_ns_route.go` 的 RPC handler 透传 `req.Code`。`convertRouteToPB` 本来就读 `Code` 字段，不用改。
+3. `edgeadmin`：`ns/routes/createPopup.go`/`updatePopup.go` 加 `CodeType`/`CodeValue` 参数，`buildRouteCode`/`splitRouteCode` 两个辅助函数做 拼接/回填；对应 `.html` 模板加"匹配类型"下拉 + 条件值输入框；`index.go`/`index.html` 顺手加了"匹配代号"列方便肉眼确认。
+4. dns-edge 不需要改任何代码——`internal/edgeagent/agent.go` 早就只认 `route.Code`，自定义线路只要有了合法 `code`，走的是跟内置线路完全一样的路径。
+
+**验证**（本机）：curl 模拟登录 edgeadmin，创建自定义线路"省份-浙江(自定义)"（`code=province:浙江`），确认落库正确；给 `test.local` 的 `zjtest` 记录建两条候选（`6.6.6.6` 绑这条自定义线路 + `7.7.7.7` 不绑线路/默认），等 edgeagent 同步后：
+- ECS 浙江电信（122.228.0.1）→ 精确命中 `6.6.6.6`
+- ECS 上海联通（210.22.70.1，不匹配浙江）→ 正确兜底 `7.7.7.7`
+- 无 ECS → 两条之间随机
+
+**踩坑记录**：验证第一轮只给 `zjtest` 建了一条记录，不管 ECS 是什么都返回同一个值，一度怀疑线路数据没传对——后来翻 `internal/dns/handler.go` 的 `pick()` 发现 `if len(records) == 1 { return records[0] }` 这个早就存在的短路逻辑（只有一个候选时没什么好选的，直接跳过地理匹配），是本地测试数据构造问题，不是新代码的 bug；补一条候选记录后复测就正常了。
+
+**风险 / 已知限制**：只支持国家/省份/运营商三类前缀匹配，不支持自定义 IP 段/CIDR/地域组合；本次全程只在本机验证，未推送到贵州/新加坡测试环境。
+
+### 10. 追加修复：前端表单提交丢字段（用户实测发现，2026-07-07）
+
+用户在页面上实测"添加线路"选"省份"类型填值保存，报错"请输入线路匹配的具体值"——但服务端校验逻辑和 curl 直接模拟提交都验证过是通的（见第9节），说明问题出在浏览器/前端渲染这一层，curl 绕过了 Vue 模板直接 POST 参数，没能测出来。
+
+**根因**：`createPopup.html`/`updatePopup.html` 里给"具体值"输入框用了 `v-if`/`v-else-if`/`v-else` 三选一渲染（省份/运营商/国家各一个同名 `codeValue` 输入框）。而这套 Tea/Vue 表单的提交机制（`data-tea-action="$"`）是原生 `new FormData(form)`，直接抓取提交那一刻 DOM 里实际存在的元素，不经过 Vue 响应式数据模型。翻查这个代码库里所有同类"选类型→显示对应值输入框"的表单（比如 DNS 服务商添加弹窗），无一例外都是用互斥条件的独立 `v-if`，没有一处用 `v-else-if`/`v-else` 链式写法——这是強信号，说明这套框架的 `v-else-if` 链在这类场景下不可靠。
+
+**修复**：改成只用一个**始终存在**的 `<input name="codeValue">`，用 `v-show`（只切换 CSS 显示，不挂载/卸载 DOM）控制是否显示，`placeholder` 通过内联三元表达式按类型切换文案，避免了任何时候 DOM 里出现零个或多个同名输入框的可能性。
+
+**顺手加了一个小功能**：`ns/records/index.html`（解析记录列表页）加了"线路"列，直接读 `record.nsRoutes`（`convertRecordToPB` 早就通过 gRPC 把这个字段带出来了，模板层不需要改 Go 代码），免得每次都要点进"修改"弹窗才能看到一条记录绑了哪些线路。
+
+**验证**：`CGO_ENABLED=0 go build ./...` 通过；本机重启 edgeadmin；curl 拉取 `/ns/records?domainId=2` 确认 `nsRoutes` 字段（含 `name`/`code`）正确出现在返回的内联 JSON 里；之前建的 `zjtest` 测试数据复测 dig 依然正常（`122.228.0.1`→`6.6.6.6`，`210.22.70.1`→`7.7.7.7`）。**浏览器端的实际保存流程本身没法用 curl 验证**（问题就出在浏览器渲染这一层），需要用户在页面上重新点一遍确认。
