@@ -1,6 +1,26 @@
 # 会话日志
 
-## 2026-07-06
+## 2026-07-07
+
+### 把 feature/ns-dns-edge 升级部署到同事共享的 admin/api 机器
+
+同事已经把 `test` 分支的 GoEdge 分开部署在两台机器上：`edge-admin` 在此前探索过的那台新 Ubuntu 机器（本地库 `edges`，318 张表，实际是孤立/未使用的旧数据），`edge-api` 在远程 AWS 新加坡机器（`aws-sg-web-obs-05`，`/data/go-edge-test/edge-api/`），真正在用的业务库是 `go-edge-test@172.31.43.85:3308`（1 节点/1 集群/1 用户/1 server，WAF 1 策略 11 规则组 17 规则，DNS 服务商 0 条——没找到用户记忆里"已连第三方 DNS 供应商"的数据，可能记错了环境或者还没配）。
+
+已确认 `feature/ns-dns-edge`（edgeapi/edgeadmin）相对同事的 `origin/test` 是严格超集（`test` 领先 0 提交），代码层面不需要再合并。升级前先用 `edge-api upgrade` 对 `go-edge-test` 的克隆库干跑一次，日志只有 2 条 `MODIFY`（字段变宽，非破坏性），没有 `DROP COLUMN`/`TRUNCATE`，确认安全后才对真库操作。
+
+`edge-api`、`edge-admin` 二进制都已换成新版本（先备份旧二进制/`web/`目录，只换二进制不动 `configs/`），数据校验前后一致。过程中发现一个真实 bug：**`/ns/clusters`、`/ns/domains` 等 5 个 NS 管理页面在列表为空时把 Go nil slice 序列化成 JSON `null`**，导致 Vue 模板渲染崩溃、页面白屏——本地开发一直有测试数据垫底从未暴露，这次是第一次部署到全新（0 记录）环境才踩到。已修复 `edgeadmin` 5 处 action（`ns/clusters`、`ns/domains`、`ns/routes`、`ns/plans`、`ns/settings` 的 `index.go`），改为显式空切片初始化，重新打包待部署。
+
+## 2026-07-06（续）
+
+### 全新机器源码编译探索 + 发现同事共享环境 + 排查 fafa.com/momo.com 记录"丢失"
+
+用户打算在一台新 Ubuntu 机器上试源码编译（给了 SSH key 生成 + Go 1.25.11 安装命令）。排查这台机器时发现已经有同事部署了 `test` 分支的 GoEdge（`/data/go-edge/edge-admin` + `edge-node`），且 `edge-admin` 连的是**远程** `47.129.241.108:8001`（AWS 新加坡区域 EC2，查不到具体是谁的账号）——真正的 edgeapi 根本不在这台机器上。确认后决定：不碰 `/data/go-edge/`，用独立目录/独立数据库名/独立端口在同一台机器上部署我们自己这套（详细步骤见对话，未来接手时可参考）。用户提出"现在就分开以后合并代价更大"，讨论后结论：代码已经是 test 的超集所以合并本身不难，但这台机器的 edge-admin 并非真正的控制面，贸然改配置等于切走一个可能带着真实流量的系统的管理入口，风险和收益不对等，还是先隔离验证。
+
+在这台开发机上排查另一件事：用户发现 `dig fafa.com`/`momo.com` REFUSED。核实 GoEdge 侧数据库（`edgeDNSDomains`）记录完好无损，只是 dns-edge 内存里这两个 zone 因为今天反复重启而丢了，且 edgeapi 的"自动恢复"机制只在**整体** zoneCount 归零时才触发重推，个别域名单独掉线不会被发现——手动把对应 `edgeDNSTasks` 的 `clusterChange` 任务重置成待处理后成功恢复。这个盲区已记入 `task_plan.md` P12。
+
+顺手在数据库里给所有集群（CDN + NS）补了几个节点（`isInstalled=1`），并给 7 条现有 NS 记录都加上了"国家+省份+ISP"线路（`edgeNSRecords.routeIds` 引用 `edgeNSRoutes`）。过程中发现一个真实缺口：**NS 记录的创建/编辑弹窗根本没有线路选择器，且 `CreateNSRecord`/`UpdateNSRecord` 这两个 RPC 硬编码把 routeIds 传 `nil`**——线路只能直接改数据库设置，页面走不通。已记入 `task_plan.md` P11。
+
+---
 
 ### 把 NS/DNS 整套改动迁移到 test 环境分支（4 个仓库）
 

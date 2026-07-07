@@ -77,6 +77,30 @@ edgeapi (gRPC :8031)
 | P3 | NS 模块端到端联调：EdgeAdmin UI → 任务 → dig 验证 | ✅ 2026-07-03 curl 模拟登录验证，见"测试报告"一节 |
 | P5 | GoEdge customHTTP 联调 | — |
 | P10 | edgeagent 重连机制 | ✅ |
+| P11 | NS 记录线路（routeIds）页面无法设置 | — 2026-07-06 发现，见下方详情 |
+| P12 | dns-edge 重启后个别域名不会自动恢复（zoneCount 非0时自动恢复不触发）| — 2026-07-06 发现，见下方详情 |
+
+### P11 详情：NS 记录创建/编辑弹窗没有线路选择器（2026-07-06）
+
+给现有 NS 记录批量加"中国-省份-ISP"线路时发现：**目前完全没法通过 EdgeAdmin 页面给记录设置线路**，只能直接改数据库（`edgeNSRecords.routeIds` 是个 JSON 数组，引用 `edgeNSRoutes.id`）。查了三处证实：
+
+1. `edgeapi/internal/rpc/services/service_ns_record.go` 的 `CreateNSRecord`/`UpdateNSRecord` 两个 RPC，调用 DAO 时 `routeIds` 参数**硬编码传 `nil`**，不管请求里实际带了什么值都会被丢弃。
+2. `edgeadmin/internal/web/actions/default/ns/records/createPopup.go`/`updatePopup.go` 后端 action 代码里完全没有 `routeIds`/线路相关字段。
+3. 对应的 `createPopup.html`/`updatePopup.html` 前端模板里也没有线路选择器控件。
+
+`edgeNSRoutes` 表本身（存线路定义，`code` 前缀 `country:`/`province:`/`isp:` 是内置线路，其余是自定义线路）目前是空的——说明这批"内置线路"数据从来没有被种过，第一次要用还得先手工插入（已经在这台开发机上插了 7 条：`country:中国`/`province:上海`/`广东`/`北京`/`isp:电信`/`移动`/`联通`，`id` 1-7）。
+
+**要修的话**：`CreateNSRecord`/`UpdateNSRecord` 把 `nil` 改成 `req.RouteIds`（proto 里应该已经有这个字段，只是没接上）；再给两个弹窗补上线路多选框（复用 `/ns/routes` 页面已有的 `FindAllDefaultChinaProvinceRoutes`/`FindAllDefaultISPRoutes`/`FindAllNSRoutes` 接口拉列表）。
+
+### P12 详情：CDN 模式记录"部分丢失"不会被自动恢复机制发现（2026-07-06）
+
+背景：本机重启 dns-edge 很多次后，用户发现 `fafa.com`/`momo.com` 两个 CDN 域名 dig 不出来（REFUSED），但同一时间 `test.local`/`example.com`/`mysite.io` 是正常的。排查确认 **GoEdge 侧数据完好无损**（`edgeDNSDomains` 表里 fafa.com/momo.com 的记录 JSON 一条没少），只是 dns-edge 内存里这两个 zone 没了。
+
+**根因**：edgeapi 的"自动恢复"（`dns_task_executor.go` 的 `resyncEmptyEdgeDNSProviders()`）只在 dns-edge **整体 zoneCount 变成 0** 时才会触发重推——判断的是"这个 DNS 服务商名下是不是完全没域名了"，不是"逐个域名检查是否还在"。因为 test.local 等域名一直在（zoneCount 从没真正归零过），fafa.com/momo.com 这两个虽然掉了，却一直不会被自动拉回来。
+
+**临时恢复方法**：EdgeAdmin → DNS 管理 → 对应 DNS 服务商 → 找到域名 → 点"同步"（本质是把 `edgeDNSTasks` 里对应集群的 `clusterChange` 任务重置成待处理，等 `DNSTaskExecutor` 下一轮 20s tick 处理）。
+
+**要修的话**：`resyncEmptyEdgeDNSProviders` 或类似巡检逻辑应该改成逐个域名核对 dns-edge 实际有的 zone 列表和 GoEdge 侧启用的 DNS 域名列表，有差异就单独补推那个域名，而不是只看整体 zoneCount 是否为 0。
 
 ## EdgeAdmin NS UI — 接口实现状态（2026-07-01）
 
