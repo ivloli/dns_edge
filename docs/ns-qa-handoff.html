@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>智能DNS（NS模式）提测文档</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    line-height: 1.7;
+    color: #172b4d;
+    background: #fff;
+    padding: 32px 40px;
+    max-width: 980px;
+  }
+
+  h1 { font-size: 24px; font-weight: 700; margin-bottom: 8px; color: #0052cc; }
+  h2 { font-size: 18px; font-weight: 600; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 2px solid #dfe1e6; color: #172b4d; }
+  h3 { font-size: 14px; font-weight: 600; margin: 20px 0 8px; color: #344563; }
+
+  .meta { color: #6b778c; font-size: 13px; margin-bottom: 24px; }
+
+  p { margin: 8px 0; }
+  ul, ol { margin: 8px 0 8px 22px; }
+  li { margin: 4px 0; }
+
+  .env-card {
+    background: #f4f5f7;
+    border: 1px solid #dfe1e6;
+    border-left: 4px solid #0052cc;
+    border-radius: 4px;
+    padding: 16px 20px;
+    margin: 12px 0 20px;
+  }
+  .env-card .env-row { display: flex; align-items: center; margin: 6px 0; gap: 12px; flex-wrap: wrap; }
+  .env-card .env-key { font-family: monospace; font-weight: 700; color: #0052cc; min-width: 110px; }
+  .env-card .env-val { font-family: monospace; background: #fff; border: 1px solid #dfe1e6; border-radius: 3px; padding: 2px 8px; color: #172b4d; }
+  .env-card .env-desc { color: #6b778c; font-size: 12px; }
+
+  pre {
+    background: #1e2a3a;
+    color: #cdd9e5;
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin: 8px 0 12px;
+    overflow-x: auto;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  pre .comment { color: #768ea2; }
+
+  code {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    background: #f0f1f3;
+    border: 1px solid #dfe1e6;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 12.5px;
+    color: #c0392b;
+  }
+
+  .expected {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    background: #e3fcef;
+    border: 1px solid #abf5d1;
+    border-radius: 4px;
+    padding: 8px 12px;
+    margin: 4px 0 12px;
+    font-size: 13px;
+    color: #006644;
+  }
+  .expected::before { content: "✓"; font-weight: 700; color: #00875a; flex-shrink: 0; }
+
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th {
+    background: #f4f5f7;
+    color: #344563;
+    font-weight: 600;
+    text-align: left;
+    padding: 9px 12px;
+    border: 1px solid #dfe1e6;
+  }
+  td { padding: 8px 12px; border: 1px solid #dfe1e6; vertical-align: top; }
+  tr:nth-child(even) td { background: #fafbfc; }
+
+  .status-col { text-align: center; width: 60px; }
+
+  .note {
+    background: #fffae6;
+    border: 1px solid #ffe380;
+    border-left: 4px solid #ffab00;
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin: 12px 0;
+    font-size: 13px;
+    color: #172b4d;
+  }
+  .note strong { color: #ff8b00; }
+
+  .warn {
+    background: #ffebe6;
+    border: 1px solid #ffbdad;
+    border-left: 4px solid #de350b;
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin: 12px 0;
+    font-size: 13px;
+    color: #172b4d;
+  }
+  .warn strong { color: #bf2600; }
+
+  .tag {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    border-radius: 3px;
+    padding: 1px 7px;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .tag-new { background: #e3fcef; color: #006644; }
+  .tag-fix { background: #ffebe6; color: #bf2600; }
+  .tag-change { background: #deebff; color: #0052cc; }
+
+  .step-num {
+    display: inline-block;
+    background: #0052cc;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    border-radius: 50%;
+    width: 22px;
+    height: 22px;
+    line-height: 22px;
+    text-align: center;
+    margin-right: 6px;
+    flex-shrink: 0;
+  }
+  .step-title { display: flex; align-items: center; margin: 20px 0 8px; }
+  .step-title h3 { margin: 0; }
+
+  hr { border: none; border-top: 1px solid #dfe1e6; margin: 28px 0; }
+</style>
+</head>
+<body>
+
+<h1>智能DNS（NS 模式）提测文档</h1>
+<p class="meta">测试环境：admin（贵州）+ api（新加坡 aws-sg-web-obs-05）+ dns-edge（贵州，同 admin 机器）· 更新日期：2026-07-07</p>
+
+<div class="note">
+  <strong>背景：</strong>dns-edge 是 GoEdge 的自建边缘 DNS 节点，支持两种独立模式：<strong>CDN 模式</strong>（edgeapi 主动推送 CDN 域名解析记录，用于给已有的 CDN 服务加速）和 <strong>NS 模式 / EdgeAdmin 里叫"智能DNS"</strong>（自己管理任意域名的权威解析，类似自建一个 DNSPod）。本次提测覆盖"智能DNS"模块整体功能，以及 2026-07-07 当天新增/修复的部分。
+</div>
+
+<!-- ───────── 0. 环境信息 ───────── -->
+<h2>0. 环境信息</h2>
+<div class="env-card">
+  <div class="env-row">
+    <span class="env-key">EdgeAdmin</span>
+    <span class="env-val">http://111.123.254.177:7788</span>
+    <span class="env-desc">测试账号找 ivloli 拿</span>
+  </div>
+  <div class="env-row">
+    <span class="env-key">admin 机器</span>
+    <span class="env-val">贵州</span>
+    <span class="env-desc">edge-admin + dns-edge 都在这台机器上</span>
+  </div>
+  <div class="env-row">
+    <span class="env-key">api 机器</span>
+    <span class="env-val">aws-sg-web-obs-05（新加坡）</span>
+    <span class="env-desc">edge-api，真正的业务数据库 <code>go-edge-test</code> 也连这台</span>
+  </div>
+  <div class="env-row">
+    <span class="env-key">dns-edge 端口</span>
+    <span class="env-val">:5300</span>
+    <span class="env-desc">DNS 查询端口（UDP+TCP），测试用端口，不是标准 53</span>
+  </div>
+</div>
+<div class="warn">
+  <strong>注意：</strong>这是共享测试环境，同事在这台机器上也有 WAF/CC 防护相关的真实配置数据（策略/规则组），测试智能DNS 功能时不要碰"服务"、"WAF策略"等无关模块的数据。
+</div>
+
+<!-- ───────── 1. 功能范围 ───────── -->
+<h2>1. 功能范围</h2>
+
+<h3>1.1 已有能力（历史开发，本次仅回归）</h3>
+<ul>
+  <li>智能DNS 集群管理：新建/编辑/删除集群，节点管理</li>
+  <li>域名管理：新建/编辑/删除域名，绑定集群</li>
+  <li>记录管理：A/AAAA/CNAME/MX/TXT/NS/SRV/CAA 各类型记录的增删改查</li>
+  <li>edgeagent 断线自动重连（dns-edge 主动连 edgeapi 的 gRPC，断线后自动退避重试）</li>
+  <li>冷启动全量同步（dns-edge 重启后自动拉取全部域名/记录，不需要人工触发）</li>
+  <li>数据看板（近24小时流量统计、域名/节点排行）</li>
+</ul>
+
+<h3>1.2 本次新增 <span class="tag tag-new">NEW</span></h3>
+<ul>
+  <li><strong>记录线路（智能解析）</strong>：记录可以按"国家/省份/运营商"配置多条不同解析结果，客户端带 EDNS Client Subnet（ECS）查询时按"省份+ISP &gt; 省份 &gt; ISP &gt; 国家 &gt; 默认"优先级降级匹配，跟 CDN 模式已有的地理路由能力一致</li>
+</ul>
+
+<h3>1.3 本次修复的 bug <span class="tag tag-fix">FIX</span></h3>
+<table>
+  <thead><tr><th>问题</th><th>影响</th><th>状态</th></tr></thead>
+  <tbody>
+    <tr><td>NS 管理页面列表为空时前端白屏</td><td>集群/域名/线路/套餐/记录等十几处列表页，只要数据为空就会崩溃</td><td>✅ 已修复</td></tr>
+    <tr><td>"添加集群"报错 500</td><td>只填名称保存时数据库报 JSON 列非法</td><td>✅ 已修复</td></tr>
+    <tr><td>域名不能绑定/修改所属集群</td><td>没有集群下拉框，域名可能落到"无集群"状态导致永远不会被同步</td><td>✅ 已修复</td></tr>
+    <tr><td>记录列表永远是空的</td><td>不管数据库里有没有记录，页面都显示"暂无记录"</td><td>✅ 已修复</td></tr>
+    <tr><td>删除按钮全部 403</td><td>集群/域名/域名分组/套餐/记录/线路/节点，7 处删除操作全部无法使用</td><td>✅ 已修复</td></tr>
+    <tr><td>删除记录/域名后不会实时同步</td><td>删除后 dns-edge 还会继续解析旧数据，要重启才清掉</td><td>✅ 已修复</td></tr>
+    <tr><td>CDN 模式记录部分丢失不会被自动发现（P12）</td><td>dns-edge 重启后，只要域名下"还有别的记录在"（zoneCount 没归零），个别丢失的记录会被自动恢复机制忽略，一直解析不出来，需要人工去点"同步"才能恢复</td><td>✅ 已修复</td></tr>
+  </tbody>
+</table>
+<div class="note"><strong>P12 修复说明：</strong>现在改成逐个域名核对 dns-edge 实际有的数据和 GoEdge 侧应该有的数据，缺了哪个域名就单独补推，不再是"要么整体都没事、要么整体一起查"。这个是后台每隔一段时间自动巡检触发的，不需要手动操作也会自愈；如果着急也可以照旧去对应集群的 DNS 设置页面点"同步"手动触发。</div>
+
+<h3>1.4 架构调整 <span class="tag tag-change">CHANGE</span></h3>
+<p><strong>摘除了"自动通配符 CNAME"</strong>：以前只要给某个 CDN 集群开了 DNS，系统会不经用户同意自动加一条 <code>*</code> 通配符解析——任意子域名（哪怕压根没配置过）都能解析出集群 IP。这个行为经确认是本项目自己加的定制（官方/团队基线分支没有），已经去掉，一共有两处独立实现（后台定时任务 + EdgeAdmin"同步"按钮各一份），都已摘除。现在如果需要泛域名解析，需要在集群的"自动设置的CNAME记录"里手动加一条 <code>*</code>，行为变成用户可见、可控。<strong>这个改动只影响 CDN 模式，不影响智能DNS。</strong></p>
+<div class="warn"><strong>测试要点：</strong>老环境如果之前已经生成过通配符记录，摘除代码本身不会自动清掉历史数据——需要去对应集群的 DNS 设置页面点一次"同步"，触发一遍清理逻辑，随便编的子域名才会变成查不到（NXDOMAIN）。这次点"同步"之后不应该再重新生成通配符了（这正是之前漏删第二处代码时复现过的问题）；测试时建议清理前后都各 dig 一次做对比确认。</div>
+
+<!-- ───────── 2. 智能DNS 基础功能测试 ───────── -->
+<h2>2. 基础功能回归</h2>
+
+<div class="step-title"><span class="step-num">1</span><h3>集群管理</h3></div>
+<p>智能DNS → 集群管理 → 添加集群（只填名称）→ 保存</p>
+<div class="expected">保存成功，不再报"服务器出了点小问题"（就是 1.3 里那个 JSON bug）</div>
+
+<div class="step-title"><span class="step-num">2</span><h3>域名管理</h3></div>
+<p>智能DNS → 域名管理 → 添加域名 → 集群下拉框选刚才建的集群 → 保存</p>
+<div class="expected">表单里能看到集群下拉框（之前完全没有这个字段）；保存后域名列表能看到这条记录，不再白屏</div>
+
+<div class="step-title"><span class="step-num">3</span><h3>记录管理 — 增删改查</h3></div>
+<p>进入域名详情 → 添加记录（类型 A，随便填个测试 IP）→ 保存 → 记录列表能看到 → 点"修改"改一下值 → 保存 → 点"删除"</p>
+<div class="expected">
+  添加后记录列表能看到（之前永远是空的）；删除时返回成功，不报 403；<code>dig @&lt;admin机器IP&gt; -p 5300 &lt;记录名&gt;.&lt;域名&gt; A</code> 能查到刚加的值，删除后几秒内（不用重启 dns-edge）就查不到了
+</div>
+
+<hr>
+
+<!-- ───────── 3. 线路匹配功能测试 ───────── -->
+<h2>3. 记录线路（智能解析）<span class="tag tag-new">NEW</span></h2>
+
+<div class="note">
+  <strong>前置条件：</strong>这套测试环境目前 <code>edgeNSRoutes</code>（线路定义表）还没有内置线路种子数据（国家/省份/ISP），需要先联系 ivloli 插入种子数据才能测这一节，否则"线路"下拉框会显示"暂无可用线路"。
+</div>
+
+<div class="step-title"><span class="step-num">1</span><h3>给记录配置线路</h3></div>
+<p>给同一个记录名（比如 <code>test</code>）配置两条不同的 A 记录：</p>
+<ul>
+  <li>记录1：值 <code>1.1.1.1</code>，线路勾选"省份-上海"+"运营商-电信"</li>
+  <li>记录2：值 <code>2.2.2.2</code>，线路勾选"省份-广东"+"运营商-移动"</li>
+</ul>
+<div class="expected">添加/编辑弹窗里能看到"线路"勾选框区域，多选后保存不报错；编辑已有记录时能看到之前勾选的线路被正确回显</div>
+
+<div class="step-title"><span class="step-num">2</span><h3>精确匹配验证</h3></div>
+<pre>
+<span class="comment"># 上海电信测试IP，应该精确命中记录1</span>
+dig @&lt;admin机器IP&gt; -p 5300 test.&lt;域名&gt; A +subnet=122.224.0.1 +short
+
+<span class="comment"># 广东移动测试IP，应该精确命中记录2</span>
+dig @&lt;admin机器IP&gt; -p 5300 test.&lt;域名&gt; A +subnet=183.232.0.1 +short</pre>
+<div class="expected">第一条稳定返回 <code>1.1.1.1</code>，第二条稳定返回 <code>2.2.2.2</code>（多次执行结果一致，不是随机的）</div>
+
+<div class="step-title"><span class="step-num">3</span><h3>无 ECS / 无匹配时的兜底</h3></div>
+<pre>
+<span class="comment"># 不带 ECS，两条记录都符合"无地理限制"候选，应该随机</span>
+for i in 1 2 3 4 5 6; do dig @&lt;admin机器IP&gt; -p 5300 test.&lt;域名&gt; A +short; done
+
+<span class="comment"># 境外IP，两条记录的"国家"都不匹配，同样兜底到全部候选随机</span>
+dig @&lt;admin机器IP&gt; -p 5300 test.&lt;域名&gt; A +subnet=8.8.8.0 +short</pre>
+<div class="expected">多次执行能同时看到 <code>1.1.1.1</code> 和 <code>2.2.2.2</code> 两个结果交替出现，不会一直卡死在某一个</div>
+
+<h3>3.x 已知限制</h3>
+<ul>
+  <li>只支持内置线路（国家/省份/运营商），不支持自定义 IP 段 / CIDR / 自定义地域线路——这类自定义线路选了也不会生效，属于本次范围之外，后续单独排期</li>
+</ul>
+
+<hr>
+
+<h2>4. 回归检查清单</h2>
+<table>
+  <thead><tr><th class="status-col">结果</th><th>检查项</th></tr></thead>
+  <tbody>
+    <tr><td class="status-col">☐</td><td>集群创建成功，不报 500</td></tr>
+    <tr><td class="status-col">☐</td><td>域名创建/编辑能看到并正确保存集群绑定</td></tr>
+    <tr><td class="status-col">☐</td><td>记录列表正常显示（不再空白）</td></tr>
+    <tr><td class="status-col">☐</td><td>记录/域名/集群/线路/套餐/节点删除按钮不再 403</td></tr>
+    <tr><td class="status-col">☐</td><td>删除记录后无需重启 dns-edge，几秒内 dig 查不到</td></tr>
+    <tr><td class="status-col">☐</td><td>记录线路多选框能保存 &amp; 回显</td></tr>
+    <tr><td class="status-col">☐</td><td>ECS 精确匹配返回稳定的对应线路记录</td></tr>
+    <tr><td class="status-col">☐</td><td>无 ECS / 境外 IP 时在候选记录间随机，不出错</td></tr>
+    <tr><td class="status-col">☐</td><td>CDN 模式集群 DNS 设置：随便编的子域名不再自动解析出集群 IP（除非手动在"自动设置的CNAME记录"里加 <code>*</code>）</td></tr>
+    <tr><td class="status-col">☐</td><td>点击集群 DNS 设置页面的"同步"按钮后，随便编的子域名依然查不到（不会被"同步"重新生成通配符）</td></tr>
+    <tr><td class="status-col">☐</td><td>集群 DNS 设置里真实配置过的具体记录（比如手动加的 CNAME 别名）点"同步"后依然正常解析，没有被误删</td></tr>
+  </tbody>
+</table>
+
+</body>
+</html>
