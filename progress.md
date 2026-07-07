@@ -8,7 +8,29 @@
 
 已确认 `feature/ns-dns-edge`（edgeapi/edgeadmin）相对同事的 `origin/test` 是严格超集（`test` 领先 0 提交），代码层面不需要再合并。升级前先用 `edge-api upgrade` 对 `go-edge-test` 的克隆库干跑一次，日志只有 2 条 `MODIFY`（字段变宽，非破坏性），没有 `DROP COLUMN`/`TRUNCATE`，确认安全后才对真库操作。
 
-`edge-api`、`edge-admin` 二进制都已换成新版本（先备份旧二进制/`web/`目录，只换二进制不动 `configs/`），数据校验前后一致。过程中发现一个真实 bug：**`/ns/clusters`、`/ns/domains` 等 5 个 NS 管理页面在列表为空时把 Go nil slice 序列化成 JSON `null`**，导致 Vue 模板渲染崩溃、页面白屏——本地开发一直有测试数据垫底从未暴露，这次是第一次部署到全新（0 记录）环境才踩到。已修复 `edgeadmin` 5 处 action（`ns/clusters`、`ns/domains`、`ns/routes`、`ns/plans`、`ns/settings` 的 `index.go`），改为显式空切片初始化，重新打包待部署。
+`edge-api`、`edge-admin` 二进制都已换成新版本（先备份旧二进制/`web/`目录，只换二进制不动 `configs/`），数据校验前后一致。
+
+### 部署过程中顺手发现并修复的 5 个真实 bug
+
+全新（0 记录）环境第一次真正把 NS 模块从头用一遍，暴露了一批此前本地开发一直靠测试数据垫底、从没触发过的 bug：
+
+1. **NS 管理页面 nil-slice → JSON `null` → 前端白屏**：`/ns/clusters`、`/ns/domains`、`/ns/routes`、`/ns/plans`、`/ns/settings`、集群详情页节点列表、域名分组下拉、线路分类列表、记录列表、仪表盘 cpu/memory/load 数值——十几处 action 在列表为空时把 Go nil slice 序列化成 `null`，Vue 模板一算 `.length` 就崩。edgeadmin `813364ed`+`e42fcc59`。
+2. **`CreateNSCluster` 写空 JSON 到 `accessLog`/`soa` 列**：EdgeAdmin"添加集群"表单只填名称，`accessLogJSON`/`soaJSON` 传空字节，MySQL JSON 列校验直接拒绝（"The document is empty"），集群建不出来。`hosts` 字段没这个问题是因为它总是过一遍 `json.Marshal`（nil → 合法的 `null` 字面量），这两个字段是直接透传原始字节。edgeapi `8ecd7f88`。
+3. **NS 域名的 `clusterId` 全链路没打通**：`convertDomainToPB` 从来没设置 `NsCluster` 字段，导致前端拿到的域名永远看不出属于哪个集群；"添加域名"弹窗只有一个隐藏的 `clusterId` 输入框（没有下拉框可选），"修改域名"弹窗压根没有这个字段——域名很容易创建成 `clusterId=0`（不属于任何集群），对应集群的 edgeagent 永远不会去拉它，页面上却显示"保存成功"。edgeapi `980982dd` + edgeadmin `2a1f80ed`（补了下拉框 + 建/改都要求必选集群）。
+4. **记录列表永远是空的**：`records/index.go` 调用 `ListNSRecords` 从没传 `Size`，Go 零值 `0` 传到 TeaGo `dbs.Query.Limit(0)` 就是拼出真的 `LIMIT 0`（这个库里 `-1` 才是"不限制"，`0` 是"真的零条"）——不管数据库里有多少条记录，列表永远查不出东西。edgeadmin `918d1f77`。
+5. **NS 全部 7 个删除按钮必定 403**：`clusters/domains/domainGroups/plans/records/routes/nodes` 这 7 个 `delete.go` 都声明了 `CSRF *actionutils.CSRF`，但对应的前端删除按钮用的是最简单的"确认框 + `$post`"（`teaweb.confirm(...) + this.$post(action).params(...).refresh()`），根本不带 `csrfToken`——跟代码库里 CDN 那边成熟的同类删除按钮（不要求 CSRF）对比后，去掉了这 7 处的 CSRF 要求，跟现有约定保持一致。edgeadmin `b1b235d8`。
+
+### dns-edge 部署到贵州 admin 机器
+
+`edge-node`（真实 CDN 边缘节点，443 端口）已经在这台机器上跑着，dns-edge 装在 `/data/go-edge/dns-edge/`，用测试端口 `:5300`（DNS）+ `:8080`（CDN 模式 API，先建好凭证但还没接哪个 DNS 服务商用）。
+
+顺手修了一个 dns-edge 自身的缺口：**`geo` 模块配了但本地没有 xdb 文件时无法从零启动下载**——`geo.New()` 在文件不存在时直接返回错误，而 updater（真正会下载文件的那个）只在 `geo.New()` 成功之后才会被构造出来，导致任何全新部署只要没有预先放好 xdb 文件，地理路由就永久禁用、不会自动补上。改成文件缺失时构造一个空 `Router`（`Lookup` 返回零值 `GeoInfo`，不会崩）、updater 照常挂上去，后台异步下载补上——已用真实 GitHub Release 验证过（下载 `v3.16.0`，10.6MB，全程无需重启）。dns-edge `b66b7e4`。
+
+在 EdgeAdmin 里新建了一个 NS 集群 `ns-test-cluster`（id=1）+ 节点 `ns-test-node01`，域名 `coffee.fafa.com`（domainId=1，绑定 `ns-test-cluster`）+ 记录 `@ A 10.0.99.99`，`dig @127.0.0.1 -p 5300 coffee.fafa.com A` 稳定返回 `10.0.99.99`。edgeagent 的断线自动重连（P10 那次修的机制）在今天多次重启 edge-api 期间也确认生效，没人工干预就自动恢复。
+
+### 顺便查清楚的一件事
+
+同事记忆里"已经连了第三方 DNS 供应商"这件事，跟这套环境（`go-edge-test`）对不上——`edgeDNSProviders`/`edgeDNSDomains` 都是 0 行。查过一批容易混淆的表名（`edgeRegionProviders` 381 行、`edgeServerRegionProviderMonthlyStats` 9 行）确认那些是 GoEdge 自带的"区域-运营商"参考字典数据和统计表，跟"接入第三方 DNS 服务商"无关，不是记录被清空，是这个环境本来就还没配过。留给用户去跟同事确认具体是哪个环境。
 
 ## 2026-07-06（续）
 

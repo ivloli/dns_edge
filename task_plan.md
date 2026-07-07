@@ -92,6 +92,12 @@ edgeapi (gRPC :8031)
 
 **要修的话**：`CreateNSRecord`/`UpdateNSRecord` 把 `nil` 改成 `req.RouteIds`（proto 里应该已经有这个字段，只是没接上）；再给两个弹窗补上线路多选框（复用 `/ns/routes` 页面已有的 `FindAllDefaultChinaProvinceRoutes`/`FindAllDefaultISPRoutes`/`FindAllNSRoutes` 接口拉列表）。
 
+**2026-07-07 补充调研，范围比最初以为的大得多**：这不是"接一下参数就行"的小修。查了 `dns_dev/internal/edgeagent/agent.go`（NS 模式的拉取端）全文，**压根没有任何处理 `routeIds`/线路匹配的代码**——`applyRecord` 直接把记录塞进 `iface.Record{}`，不看路线字段。也就是说即使把 edgeapi 的 RPC 接上、edgeadmin 页面加上线路选择框，让用户能给 NS 记录选线路，**dns-edge 实际解析请求时也不会用这个字段做任何区分**，保存的线路选择纯粹是摆设。
+
+对比之下，"按线路/ECS 子网返回不同记录"这个能力**目前只存在于 CDN 模式**（`dns_dev/internal/api/edgedns_provider.go`，走 ip2region，已经用 `+subnet=` 验证过、写进了 `docs/cdn-cluster-geo-dig-test.md`）。用户回忆的"边缘节点记录能配线路、dig 能测 ECS 匹配"说的就是这套，跟 NS 模式是完全独立的两套代码路径。
+
+要让 NS 模式的线路真正生效，除了上面 P11 原本列的 RPC/UI 工作，还需要**在 dns-edge 里新写一段 NS 模式的线路匹配逻辑**（读 ECS 子网 → 查 ip2region 或类似方式 → 按 `routeIds` 过滤候选记录），工作量接近于把 CDN 模式已有的 geo 路由能力在 NS 模式这条代码路径里重新实现一遍，不是一个小任务，需要单独排期。
+
 ### P12 详情：CDN 模式记录"部分丢失"不会被自动恢复机制发现（2026-07-06）
 
 背景：本机重启 dns-edge 很多次后，用户发现 `fafa.com`/`momo.com` 两个 CDN 域名 dig 不出来（REFUSED），但同一时间 `test.local`/`example.com`/`mysite.io` 是正常的。排查确认 **GoEdge 侧数据完好无损**（`edgeDNSDomains` 表里 fafa.com/momo.com 的记录 JSON 一条没少），只是 dns-edge 内存里这两个 zone 没了。
