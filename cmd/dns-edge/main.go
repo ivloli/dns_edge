@@ -115,9 +115,20 @@ func main() {
 	if cfg.Geo.XDBPath != "" {
 		r, geoErr := geo.New(cfg.Geo.XDBPath)
 		if geoErr != nil {
-			log.Warn("geo-routing disabled: failed to load xdb", zap.String("path", cfg.Geo.XDBPath), zap.Error(geoErr))
+			if !cfg.Geo.AutoUpdate {
+				log.Warn("geo-routing disabled: failed to load xdb", zap.String("path", cfg.Geo.XDBPath), zap.Error(geoErr))
+			} else {
+				// No local xdb yet (e.g. brand-new deployment) — start with an
+				// empty router (Lookup returns zero-value GeoInfo until the
+				// first download completes) and let the updater fetch it below.
+				log.Info("no local xdb found, will download on startup", zap.String("path", cfg.Geo.XDBPath), zap.Error(geoErr))
+				r = &geo.Router{}
+			}
 		} else {
 			log.Info("geo-routing enabled", zap.String("xdb", cfg.Geo.XDBPath))
+		}
+
+		if r != nil {
 			defer r.Close()
 			geoRouter = r
 
@@ -127,7 +138,10 @@ func main() {
 					Interval:        cfg.Geo.UpdateInterval,
 					DownloadTimeout: 10 * time.Minute,
 				}, cfg.Geo.XDBPath, r, log)
-				// startup check in background (non-blocking)
+				// startup check in background (non-blocking). force=false is
+				// fine even for a brand-new deployment: CheckAndUpdate treats
+				// a missing local file as needing a download regardless of
+				// force, so this still bootstraps from zero.
 				go func() {
 					if err := geoUpdater.CheckAndUpdate(false); err != nil {
 						log.Warn("ip2region startup update check failed", zap.Error(err))
