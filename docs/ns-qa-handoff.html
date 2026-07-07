@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>智能DNS（NS模式）提测文档</title>
+<title>dns-edge 提测文档（边缘权威DNS：CDN模式 + 智能DNS）</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -149,11 +149,15 @@
 </head>
 <body>
 
-<h1>智能DNS（NS 模式）提测文档</h1>
+<h1>dns-edge 提测文档（边缘权威DNS）</h1>
 <p class="meta">测试环境：admin（贵州）+ api（新加坡 aws-sg-web-obs-05）+ dns-edge（贵州，同 admin 机器）· 更新日期：2026-07-07</p>
 
 <div class="note">
-  <strong>背景：</strong>dns-edge 是 GoEdge 的自建边缘 DNS 节点，支持两种独立模式：<strong>CDN 模式</strong>（edgeapi 主动推送 CDN 域名解析记录，用于给已有的 CDN 服务加速）和 <strong>NS 模式 / EdgeAdmin 里叫"智能DNS"</strong>（自己管理任意域名的权威解析，类似自建一个 DNSPod）。本次提测覆盖"智能DNS"模块整体功能，以及 2026-07-07 当天新增/修复的部分。
+  <strong>背景：</strong>dns-edge 是 GoEdge 的自建边缘权威 DNS 节点，支持两种独立模式，<strong>本次提测两个模式都要覆盖</strong>：
+  <ul>
+    <li><strong>CDN 模式</strong>（EdgeAdmin 里叫"域名解析" / "DNS服务商"）：edgeapi 主动推送 CDN 域名解析记录到 dns-edge，用于给已有的 CDN 服务加速，本次改动集中在摘除一个意外的自动通配符行为、以及一个自动恢复机制的修复。</li>
+    <li><strong>NS 模式</strong>（EdgeAdmin 里叫"智能DNS"）：自己管理任意域名的权威解析，类似自建一个 DNSPod，本次新增了记录线路（智能解析）能力，并修复了一批阻塞性 bug。</li>
+  </ul>
 </div>
 
 <!-- ───────── 0. 环境信息 ───────── -->
@@ -188,8 +192,15 @@
 <h2>1. 功能范围</h2>
 
 <h3>1.1 已有能力（历史开发，本次仅回归）</h3>
+<p><strong>CDN 模式：</strong></p>
 <ul>
-  <li>智能DNS 集群管理：新建/编辑/删除集群，节点管理</li>
+  <li>DNS 服务商管理：添加/编辑/删除服务商（DNSPod、阿里云、自建 edgeDNSAPI 等多种类型）</li>
+  <li>集群 DNS 设置：绑定主域名、自动同步节点 IP、动态权重、地理路由（ECS 子网 + ip2region，省份/ISP/国家多级降级匹配）</li>
+  <li>集群 DNS 数据"部分丢失"自动巡检恢复（P12，本次改成了逐域名核对，见 1.3）</li>
+</ul>
+<p><strong>智能DNS（NS 模式）：</strong></p>
+<ul>
+  <li>集群管理：新建/编辑/删除集群，节点管理</li>
   <li>域名管理：新建/编辑/删除域名，绑定集群</li>
   <li>记录管理：A/AAAA/CNAME/MX/TXT/NS/SRV/CAA 各类型记录的增删改查</li>
   <li>edgeagent 断线自动重连（dns-edge 主动连 edgeapi 的 gRPC，断线后自动退避重试）</li>
@@ -218,11 +229,41 @@
 <div class="note"><strong>P12 修复说明：</strong>现在改成逐个域名核对 dns-edge 实际有的数据和 GoEdge 侧应该有的数据，缺了哪个域名就单独补推，不再是"要么整体都没事、要么整体一起查"。这个是后台每隔一段时间自动巡检触发的，不需要手动操作也会自愈；如果着急也可以照旧去对应集群的 DNS 设置页面点"同步"手动触发。</div>
 
 <h3>1.4 架构调整 <span class="tag tag-change">CHANGE</span></h3>
-<p><strong>摘除了"自动通配符 CNAME"</strong>：以前只要给某个 CDN 集群开了 DNS，系统会不经用户同意自动加一条 <code>*</code> 通配符解析——任意子域名（哪怕压根没配置过）都能解析出集群 IP。这个行为经确认是本项目自己加的定制（官方/团队基线分支没有），已经去掉，一共有两处独立实现（后台定时任务 + EdgeAdmin"同步"按钮各一份），都已摘除。现在如果需要泛域名解析，需要在集群的"自动设置的CNAME记录"里手动加一条 <code>*</code>，行为变成用户可见、可控。<strong>这个改动只影响 CDN 模式，不影响智能DNS。</strong></p>
-<div class="warn"><strong>测试要点：</strong>老环境如果之前已经生成过通配符记录，摘除代码本身不会自动清掉历史数据——需要去对应集群的 DNS 设置页面点一次"同步"，触发一遍清理逻辑，随便编的子域名才会变成查不到（NXDOMAIN）。这次点"同步"之后不应该再重新生成通配符了（这正是之前漏删第二处代码时复现过的问题）；测试时建议清理前后都各 dig 一次做对比确认。</div>
+<p><strong>摘除了"自动通配符 CNAME"</strong>：以前只要给某个 CDN 集群开了 DNS，系统会不经用户同意自动加一条 <code>*</code> 通配符解析——任意子域名（哪怕压根没配置过）都能解析出集群 IP。这个行为经确认是本项目自己加的定制（官方/团队基线分支没有），已经去掉，一共有两处独立实现（后台定时任务 + EdgeAdmin"同步"按钮各一份），都已摘除。现在如果需要泛域名解析，需要在集群的"自动设置的CNAME记录"里手动加一条 <code>*</code>，行为变成用户可见、可控。<strong>这个改动只影响 CDN 模式，不影响智能DNS，具体测试步骤见第 2 节。</strong></p>
 
-<!-- ───────── 2. 智能DNS 基础功能测试 ───────── -->
-<h2>2. 基础功能回归</h2>
+<!-- ───────── 2. CDN 模式测试 ───────── -->
+<h2>2. CDN 模式（域名解析）</h2>
+
+<div class="step-title"><span class="step-num">1</span><h3>通配符 CNAME 摘除验证</h3></div>
+<p>找一个已经配了 DNS 的 CDN 集群（比如测试环境现有的"默认集群"，主域名 <code>test.node</code>），先 dig 一个**随便编的、肯定没配置过**的子域名：</p>
+<pre>dig @&lt;admin机器IP&gt; -p 5300 &lt;随便编的字符串&gt;.test.node A +short</pre>
+<div class="expected">查不到任何结果（NXDOMAIN），不会解析出集群 IP</div>
+
+<div class="step-title"><span class="step-num">2</span><h3>"同步"按钮不会复现通配符</h3></div>
+<p>去这个集群的 DNS 设置页面点一次"同步"按钮，然后重新 dig 同一个随便编的子域名</p>
+<div class="expected">
+  点击"同步"后依然查不到结果——之前有个遗漏（后台定时任务和"同步"按钮各有一份独立的通配符生成代码，只删了一份），这次两份都已确认摘除，点"同步"不应该再让通配符复现
+</div>
+
+<div class="step-title"><span class="step-num">3</span><h3>真实记录不受影响</h3></div>
+<p>找一条这个集群下真实配置过的具体记录（集群自己的 <code>dnsName</code> 子域名，或者"自动设置的CNAME记录"里手动加的别名），点"同步"前后各 dig 一次</p>
+<div class="expected">前后结果一致，正常解析，没有被误删</div>
+
+<div class="step-title"><span class="step-num">4</span><h3>P12 自动恢复验证（可选，需要能重启 dns-edge 或人为制造数据缺口）</h3></div>
+<p>如果同一个域名下有多个集群共用（比如测试环境的 <code>test.node</code> domain 同时挂了"默认集群"和"test-01"两个集群），重启一次 dns-edge 之后只让其中一个集群的任务重新跑（另一个不用管，模拟"个别集群的数据没跟上"的场景），等待后台自动巡检周期（不需要手动点同步）</p>
+<div class="expected">一段时间后另一个集群的记录也应该被自动核对出来缺失并补推回来，不需要人工干预（之前的版本这种情况会永远不被发现，除非整个域名都清零）</div>
+
+<div class="step-title"><span class="step-num">5</span><h3>地理路由（ECS）回归</h3></div>
+<p>CDN 模式的地理路由是老功能，本次没有改动，走一遍现有的验证方式即可（参考 <code>docs/cdn-cluster-geo-dig-test.md</code>）：</p>
+<pre>
+<span class="comment"># 带 ECS 子网，应该按省份/ISP/国家优先级匹配到最合适的节点</span>
+dig @&lt;admin机器IP&gt; -p 5300 &lt;集群dnsName&gt;.&lt;域名&gt; A +subnet=122.224.0.1 +short</pre>
+<div class="expected">跟之前验证过的结果一致（没有回归）</div>
+
+<hr>
+
+<!-- ───────── 3. 智能DNS 基础功能测试 ───────── -->
+<h2>3. 智能DNS 基础功能回归</h2>
 
 <div class="step-title"><span class="step-num">1</span><h3>集群管理</h3></div>
 <p>智能DNS → 集群管理 → 添加集群（只填名称）→ 保存</p>
@@ -240,8 +281,8 @@
 
 <hr>
 
-<!-- ───────── 3. 线路匹配功能测试 ───────── -->
-<h2>3. 记录线路（智能解析）<span class="tag tag-new">NEW</span></h2>
+<!-- ───────── 4. 线路匹配功能测试 ───────── -->
+<h2>4. 智能DNS 记录线路（智能解析）<span class="tag tag-new">NEW</span></h2>
 
 <div class="note">
   <strong>前置条件：</strong>这套测试环境目前 <code>edgeNSRoutes</code>（线路定义表）还没有内置线路种子数据（国家/省份/ISP），需要先联系 ivloli 插入种子数据才能测这一节，否则"线路"下拉框会显示"暂无可用线路"。
@@ -273,28 +314,30 @@ for i in 1 2 3 4 5 6; do dig @&lt;admin机器IP&gt; -p 5300 test.&lt;域名&gt; 
 dig @&lt;admin机器IP&gt; -p 5300 test.&lt;域名&gt; A +subnet=8.8.8.0 +short</pre>
 <div class="expected">多次执行能同时看到 <code>1.1.1.1</code> 和 <code>2.2.2.2</code> 两个结果交替出现，不会一直卡死在某一个</div>
 
-<h3>3.x 已知限制</h3>
+<h3>4.x 已知限制</h3>
 <ul>
   <li>只支持内置线路（国家/省份/运营商），不支持自定义 IP 段 / CIDR / 自定义地域线路——这类自定义线路选了也不会生效，属于本次范围之外，后续单独排期</li>
 </ul>
 
 <hr>
 
-<h2>4. 回归检查清单</h2>
+<h2>5. 回归检查清单</h2>
 <table>
   <thead><tr><th class="status-col">结果</th><th>检查项</th></tr></thead>
   <tbody>
-    <tr><td class="status-col">☐</td><td>集群创建成功，不报 500</td></tr>
-    <tr><td class="status-col">☐</td><td>域名创建/编辑能看到并正确保存集群绑定</td></tr>
-    <tr><td class="status-col">☐</td><td>记录列表正常显示（不再空白）</td></tr>
-    <tr><td class="status-col">☐</td><td>记录/域名/集群/线路/套餐/节点删除按钮不再 403</td></tr>
-    <tr><td class="status-col">☐</td><td>删除记录后无需重启 dns-edge，几秒内 dig 查不到</td></tr>
-    <tr><td class="status-col">☐</td><td>记录线路多选框能保存 &amp; 回显</td></tr>
-    <tr><td class="status-col">☐</td><td>ECS 精确匹配返回稳定的对应线路记录</td></tr>
-    <tr><td class="status-col">☐</td><td>无 ECS / 境外 IP 时在候选记录间随机，不出错</td></tr>
-    <tr><td class="status-col">☐</td><td>CDN 模式集群 DNS 设置：随便编的子域名不再自动解析出集群 IP（除非手动在"自动设置的CNAME记录"里加 <code>*</code>）</td></tr>
-    <tr><td class="status-col">☐</td><td>点击集群 DNS 设置页面的"同步"按钮后，随便编的子域名依然查不到（不会被"同步"重新生成通配符）</td></tr>
-    <tr><td class="status-col">☐</td><td>集群 DNS 设置里真实配置过的具体记录（比如手动加的 CNAME 别名）点"同步"后依然正常解析，没有被误删</td></tr>
+    <tr><td class="status-col">☐</td><td><strong>[CDN]</strong> 随便编的子域名不再自动解析出集群 IP（除非手动在"自动设置的CNAME记录"里加 <code>*</code>）</td></tr>
+    <tr><td class="status-col">☐</td><td><strong>[CDN]</strong> 点击集群 DNS 设置页面的"同步"按钮后，随便编的子域名依然查不到（不会被"同步"重新生成通配符）</td></tr>
+    <tr><td class="status-col">☐</td><td><strong>[CDN]</strong> 集群 DNS 设置里真实配置过的具体记录（比如手动加的 CNAME 别名）点"同步"后依然正常解析，没有被误删</td></tr>
+    <tr><td class="status-col">☐</td><td><strong>[CDN]</strong> 多集群共用一个域名时，个别集群的数据缺失能被后台自动巡检发现并补推，不需要整个域名清零才触发（P12）</td></tr>
+    <tr><td class="status-col">☐</td><td><strong>[CDN]</strong> 地理路由（ECS）解析结果跟之前一致，没有回归</td></tr>
+    <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> 集群创建成功，不报 500</td></tr>
+    <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> 域名创建/编辑能看到并正确保存集群绑定</td></tr>
+    <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> 记录列表正常显示（不再空白）</td></tr>
+    <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> 记录/域名/集群/线路/套餐/节点删除按钮不再 403</td></tr>
+    <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> 删除记录后无需重启 dns-edge，几秒内 dig 查不到</td></tr>
+    <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> 记录线路多选框能保存 &amp; 回显</td></tr>
+    <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> ECS 精确匹配返回稳定的对应线路记录</td></tr>
+    <tr><td class="status-col">☐</td><td><strong>[智能DNS]</strong> 无 ECS / 境外 IP 时在候选记录间随机，不出错</td></tr>
   </tbody>
 </table>
 
