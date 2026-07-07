@@ -78,7 +78,7 @@ edgeapi (gRPC :8031)
 | P5 | GoEdge customHTTP 联调 | — |
 | P10 | edgeagent 重连机制 | ✅ |
 | P11 | NS 记录线路（routeIds）页面无法设置，且线路匹配逻辑本身也未实现 | ✅ 2026-07-07 全部修完，见下方详情 |
-| P12 | dns-edge 重启后个别域名不会自动恢复（zoneCount 非0时自动恢复不触发）| — 2026-07-06 发现，见下方详情 |
+| P12 | dns-edge 重启后个别域名不会自动恢复（zoneCount 非0时自动恢复不触发）| ✅ 2026-07-07 修复，见下方详情 |
 
 ### P11 详情：NS 记录创建/编辑弹窗没有线路选择器（2026-07-06）
 
@@ -117,6 +117,12 @@ edgeapi (gRPC :8031)
 
 **要修的话**：`resyncEmptyEdgeDNSProviders` 或类似巡检逻辑应该改成逐个域名核对 dns-edge 实际有的 zone 列表和 GoEdge 侧启用的 DNS 域名列表，有差异就单独补推那个域名，而不是只看整体 zoneCount 是否为 0。
 
+**2026-07-07 补充：同一个 bug 在"多集群共用一个域名"场景下的变体**。测试环境里 `test.node` 域名同时挂了两个集群（默认集群 `g993d53.cdn` + `test-01` 集群 `g43bb01.cdn`）。今天部署过程中 dns-edge 重启了几次，默认集群的记录因为经常有变更（今天一直在改）很快就重新推送回来了，但 `test-01` 集群自己的 DNS 任务最后一次运行是在 dns-edge 那几次重启**之前**，重启后一直没有触发过重新推送——因为域名整体 zoneCount 从没归零过（默认集群的记录一直在），P12 的自动恢复机制根本不知道 `test-01` 这部分数据已经丢了。
+
+一开始误判为"两个集群共用域名时，一个集群的任务会把另一个集群的记录当垃圾清掉"，仔细读代码后确认是**误判**——`doCluster` 清理"多余记录"时是按 `record.Name == clusterDNSName` 精确过滤的，不会碰到别的集群的记录；真正读取回显 GoEdge 数据库的 `domainChange`/`doDomainWithTask` 也只是只读地把 dns-edge 当前有什么记录同步回来，不会主动删除。所以这**不是**一个新 bug，就是 P12 本身，只是这次是"域名下某一个集群的子集丢了"而不是"整个域名丢了"，恢复方法完全一样（把对应集群的 `clusterChange` 任务重置成待处理），当天已验证恢复成功。
+
+**2026-07-07 修复**：`resyncEmptyEdgeDNSProviders`（`edgeapi/internal/tasks/dns_task_executor.go`）加了第二遍检查——`zoneCount==0` 时保留原来的整体重推逻辑；`zoneCount>0` 时新增一段：拉这个服务商应该服务的全部启用域名列表（`dnsmodels.SharedDNSDomainDAO.FindAllEnabledDomainsWithProviderId`），再调 `EdgeDNSAPIProvider.GetDomains()` 拿 dns-edge 实际有的 zone 列表逐个域名比对，缺了哪个域名就找绑定的集群（`models.SharedNodeClusterDAO.FindAllEnabledClusterIdsWithDNSDomainId`）单独补一个 `ClusterChange` 任务，而不是要么全推、要么啥都不管。`go build`/`go vet`/现有 `TestDNSTaskExecutor_Loop` 测试通过，commit `807d4ce2`。
+
 ### P13：摘除了自动通配符 CNAME（2026-07-07 决定，已执行）
 
 `edgeapi/internal/tasks/dns_task_executor.go` 里有一段"通配符 CNAME"逻辑（`// 通配符 CNAME：保证 * 始终存在...`）：只要集群配了 DNS，就会**无条件**给域名自动加一条 `* CNAME <集群dnsName>`，用户没有任何地方能感知或关闭这个行为。今天部署测试环境时被这个行为搞得一头雾水（`dig` 任意子域名都能解析出集群 IP，一开始以为是 bug）。
@@ -128,6 +134,8 @@ edgeapi (gRPC :8031)
 **后续想法（还没设计，留给以后）**：用户提出以后可能想做一个更"引导式"的开关（比如集群 DNS 设置页面加一个"启用泛域名自动解析"的勾选框，默认关闭），而不是让用户自己知道要去"自动设置的CNAME记录"里手动加 `*`。这个只是个想法，还没有具体方案，等后面有空再设计。
 
 **确认过**：今天测试环境（贵州/新加坡）目前没有任何域名依赖这个行为，摘除是安全的。
+
+**部署后的踩坑**：摘掉生成通配符的代码只能阻止*以后*新生成通配符，**不会自动删除数据库里已经存在的历史通配符记录**——部署完之后发现 `w3.test.node`/`gd53.cdn.test.node` 这类随便编的子域名还是能解析出来，一查发现 `test.node` 记录里还留着两条历史 `*` CNAME（两个共用该域名的集群各留了一条）。需要手动把对应集群的 `clusterChange` 任务重置成待处理、等它们在新代码下重新跑一次"多余记录"清理逻辑，才会真正把旧通配符记录删掉。以后再有类似"摘除自动生成逻辑"的改动，记得同时说明需要触发一次重新同步才能清掉历史数据，不是重新部署代码就自动生效。
 
 ## EdgeAdmin NS UI — 接口实现状态（2026-07-01）
 
