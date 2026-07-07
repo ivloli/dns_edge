@@ -77,7 +77,7 @@ edgeapi (gRPC :8031)
 | P3 | NS 模块端到端联调：EdgeAdmin UI → 任务 → dig 验证 | ✅ 2026-07-03 curl 模拟登录验证，见"测试报告"一节 |
 | P5 | GoEdge customHTTP 联调 | — |
 | P10 | edgeagent 重连机制 | ✅ |
-| P11 | NS 记录线路（routeIds）页面无法设置 | — 2026-07-06 发现，见下方详情 |
+| P11 | NS 记录线路（routeIds）页面无法设置，且线路匹配逻辑本身也未实现 | ✅ 2026-07-07 全部修完，见下方详情 |
 | P12 | dns-edge 重启后个别域名不会自动恢复（zoneCount 非0时自动恢复不触发）| — 2026-07-06 发现，见下方详情 |
 
 ### P11 详情：NS 记录创建/编辑弹窗没有线路选择器（2026-07-06）
@@ -97,6 +97,15 @@ edgeapi (gRPC :8031)
 对比之下，"按线路/ECS 子网返回不同记录"这个能力**目前只存在于 CDN 模式**（`dns_dev/internal/api/edgedns_provider.go`，走 ip2region，已经用 `+subnet=` 验证过、写进了 `docs/cdn-cluster-geo-dig-test.md`）。用户回忆的"边缘节点记录能配线路、dig 能测 ECS 匹配"说的就是这套，跟 NS 模式是完全独立的两套代码路径。
 
 要让 NS 模式的线路真正生效，除了上面 P11 原本列的 RPC/UI 工作，还需要**在 dns-edge 里新写一段 NS 模式的线路匹配逻辑**（读 ECS 子网 → 查 ip2region 或类似方式 → 按 `routeIds` 过滤候选记录），工作量接近于把 CDN 模式已有的 geo 路由能力在 NS 模式这条代码路径里重新实现一遍，不是一个小任务，需要单独排期。
+
+**2026-07-07 完成**：调研后发现范围比想象中小——`filterByGeo`（`internal/dns/handler.go`）本来就是通用的，`iface.Record.RouteTags`/`ZoneStore` 多记录支持也早就有，查询路径完全不用改，`pb.NSRecord.NsRoutes` 协议字段也早就定义好了，只是没人填。实际改动：
+- edgeapi `service_ns_record.go`：`CreateNSRecord`/`UpdateNSRecord` 接上 `req.NsRouteIds`；`convertRecordToPB` 反查 `routeIds` 填充 `NsRoutes`。
+- edgeadmin：`ns/records/createPopup.go`/`updatePopup.go` + 对应模板加线路多选（复用 `FindAllDefaultChinaProvinceRoutes`/`FindAllDefaultISPRoutes`）。
+- dns-edge：新包 `internal/nsroute`（`CodesToTags`，从 CDN 模式的 `nsRouteCodesToTags` 抽出来给两边共用），`edgeagent/agent.go` 的 `applyRecord` 用它填充 `RouteTags`。
+- 只支持内置线路（`country:`/`province:`/`isp:` 前缀），不支持自定义 IP 段/CIDR/地域 ID 线路，跟 CDN 模式的实际能力对齐（CDN 那边同样只处理 `code`，不解析 `RangesJSON`）。
+- 本机端到端验证通过（同名多线路记录 + `+subnet=` 精确匹配/无 ECS 随机/境外 IP 兜底三种场景），详见 `docs/ecs-geo-routing-design.md` 第 9 节。
+- 全程只在本机验证，**没有部署到今天已经上线的贵州/新加坡测试环境**，也没有推送到远程仓库，等你确认后再说。
+- 顺带发现并修复一个独立 bug：NS 记录/域名软删除后，增量同步（10s 轮询）没有及时把删除同步给 dns-edge，要等 dns-edge 重启触发全量同步才清掉。根因：`NSRecordDAO.DeleteNSRecord`/`NSDomainDAO.DeleteNSDomain` 只把 `state` 置为禁用，**没有更新 `version` 列**，而 `ListNSRecordsAfterVersion`/`ListNSDomainsAfterVersion` 增量同步是靠 `WHERE version > ?` 过滤的——删除时 version 不变，这条记录就永远不会再出现在增量结果里，等于对增量同步"隐身"了。两个 DAO 的 `Delete*` 方法都补上了 `Set("version", time.Now().UnixNano())`（跟 `Create`/`Update` 用的是同一套 version 生成方式）。本机验证：不重启 dns-edge，纯靠 10 秒轮询，删除后正确落回通配符兜底。
 
 ### P12 详情：CDN 模式记录"部分丢失"不会被自动恢复机制发现（2026-07-06）
 

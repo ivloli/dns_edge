@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	"dns-edge/internal/iface"
+	"dns-edge/internal/nsroute"
 )
 
 // Agent polls edgeapi for NS node tasks and refreshes ZoneStore.
@@ -359,13 +360,21 @@ func (a *Agent) applyRecord(r *pb.NSRecord) error {
 		return nil
 	}
 
+	var routeCodes []string
+	for _, route := range r.NsRoutes {
+		if route.Code != "" {
+			routeCodes = append(routeCodes, route.Code)
+		}
+	}
+
 	rec := &iface.Record{
-		ID:    r.Id,
-		Name:  recFQDN,
-		Type:  qtype,
-		TTL:   uint32(r.Ttl),
-		Value: r.Value,
-		RR:    rr,
+		ID:        r.Id,
+		Name:      recFQDN,
+		Type:      qtype,
+		TTL:       uint32(r.Ttl),
+		Value:     r.Value,
+		RR:        rr,
+		RouteTags: nsroute.CodesToTags(routeCodes),
 	}
 	return a.store.PutRecord(targetApex, rec)
 }

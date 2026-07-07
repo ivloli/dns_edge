@@ -12,6 +12,7 @@ import (
 	mdns "github.com/miekg/dns"
 
 	"dns-edge/internal/iface"
+	"dns-edge/internal/nsroute"
 )
 
 // ── static route tables ───────────────────────────────────────────────────────
@@ -553,17 +554,9 @@ func qualifyName(name, apex string) string {
 
 // nsRouteCodesToTags converts GoEdge nsRouteCodes (["province:上海","isp:电信"])
 // to the internal route_tags format ("province=上海;isp=电信").
+// Shared with internal/edgeagent via internal/nsroute.
 func nsRouteCodesToTags(codes []string) string {
-	var parts []string
-	for _, code := range codes {
-		if code == "" || code == "default" {
-			continue
-		}
-		if idx := strings.IndexByte(code, ':'); idx > 0 {
-			parts = append(parts, code[:idx]+"="+code[idx+1:])
-		}
-	}
-	return strings.Join(parts, ";")
+	return nsroute.CodesToTags(codes)
 }
 
 // routeTagsToNSRoutes converts internal route_tags back to nsRoutes for responses.

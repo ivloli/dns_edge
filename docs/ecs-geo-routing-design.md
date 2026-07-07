@@ -198,4 +198,36 @@ dns-edge {
 | P3 | `ServeDNS` 集成：ECS clientIP → filterByGeo → 加权随机 | ✅ 已完成 |
 | P4 | `Record.RouteTags` 字段 + `nsRouteCodesToTags`/`nsRouteTagsToCodes` 双向转换 | ✅ 已完成 |
 | P5 | 单元测试（filterByGeo tier 优先级、ECS 集成、xdb 解析） | ✅ 已完成 |
-| P6 | xdb 自动更新（GitHub Releases 定期拉取 + atomic 热替换） | ✅ 已完成 |
+| P6 | xdb 自动更新（GitHub Releases 定期拉取 + atomic 热替换）；2026-07-07 补充：从零部署（本地无 xdb 文件）时也能自动首次下载，不再永久禁用地理路由 | ✅ 已完成 |
+| P7 | NS 模式（智能DNS）接入同一套 `filterByGeo`（2026-07-07 新增，见第 9 节） | ✅ 已完成 |
+
+---
+
+## 9. NS 模式接入 ECS 地理路由（2026-07-07）
+
+**背景**：`filterByGeo`/`pick`（`internal/dns/handler.go`）从设计上就是通用的——只依赖 `iface.Record.RouteTags` 字符串和 `GeoInfo`，不区分记录是 CDN 模式推送来的还是 NS 模式拉取来的。`iface.Record` 也早就有 `RouteTags` 字段、`ZoneStore` 也早就支持同一个 (name,type) 存多条记录——**查询路径（`handler.go`）完全没有改动**，这次纯粹是把 NS 模式拉取记录时"生成 `RouteTags`"这一步补上。
+
+**数据链路**（对比第 2 节的 CDN 模式数据流）：
+
+```
+EdgeAdmin「记录管理」勾选线路（省份/ISP，内置线路，多选）
+  │  POST routeIds=[1,4,6] → CreateNSRecordRequest.NsRouteIds
+  ▼
+edgeapi service_ns_record.go
+  │  CreateNSRecord/UpdateNSRecord 落库 edgeNSRecords.routeIds（JSON int64 数组）
+  │  convertRecordToPB：按 routeIds 反查 edgeNSRoutes，取 code（"province:上海"等），
+  │  组装进 pb.NSRecord.NsRoutes（协议里本来就有这个字段，之前从未被赋值）
+  ▼
+dns-edge internal/edgeagent/agent.go
+  │  applyRecord(r *pb.NSRecord)：收集 r.NsRoutes[].Code（非空的）
+  │  调 internal/nsroute.CodesToTags(codes) → "province=上海;isp=电信"
+  │  赋给 iface.Record.RouteTags
+  ▼
+internal/dns/handler.go filterByGeo（无需改动，跟 CDN 模式共用同一套代码）
+```
+
+**共享转换逻辑**：`nsRouteCodesToTags`（原本只在 `internal/api/edgedns_provider.go` 给 CDN 模式用）抽到了新包 `internal/nsroute`（`CodesToTags`），`internal/api` 和 `internal/edgeagent` 都从这里调用，避免重复实现两遍。
+
+**已知限制**：只支持内置线路（`edgeNSRoutes.code` 前缀 `country:`/`province:`/`isp:`），不支持自定义 IP 段/CIDR/地域 ID 线路——`NSRoute.Ranges` 是一套独立的 JSON 结构（`{type: ipRange|cidr|region, params:{...}}`），要完整支持需要额外解析 CIDR + 反查 `regions` 系列表，复杂度高很多；CDN 模式本身的 `nsRouteCodesToTags` 也只处理 `code`，不解析 `RangesJSON`，所以这次保持两边能力对齐。
+
+**验证**：本机对同一记录名配两条不同线路的记录，`dig +subnet=` 精确匹配、无 ECS 随机、境外 IP 全兜底三种场景全部符合预期，跟 CDN 模式已有的 `handler_test.go` 用例行为一致。

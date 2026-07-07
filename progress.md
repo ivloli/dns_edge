@@ -1,5 +1,19 @@
 # 会话日志
 
+## 2026-07-07（续二）
+
+### NS 模式（智能DNS）接入线路匹配，本机开发验证（P11 补完）
+
+部署到测试环境后发现 NS 记录没有线路选择器（P11），深入调研发现根子更深：dns-edge 的 NS 拉取路径（`edgeagent`）压根没有任何 geo/线路匹配逻辑，跟 CDN 模式的成熟能力（ECS + ip2region + 5级降级）完全脱节。
+
+调研后发现范围比想象中小很多——`internal/dns/handler.go` 的 `filterByGeo` 本来就是通用的（只认 `iface.Record.RouteTags`，不分 CDN/NS 来源），`RouteTags` 字段、`ZoneStore` 多记录支持、`pb.NSRecord.NsRoutes` 协议字段都早就有了，只是没人真正用起来。改动集中在三处：edgeapi 的 `convertRecordToPB` 反查线路填充 `NsRoutes` + `Create/UpdateNSRecord` 接上 `routeIds`；edgeadmin 的记录弹窗加线路多选框；dns-edge 把 CDN 模式现成的 `nsRouteCodesToTags` 抽成共享包 `internal/nsroute`，`edgeagent.applyRecord` 拿来给 `RouteTags` 赋值——**查询路径 `handler.go` 完全没有改动**。
+
+本机端到端验证：给同一记录名配两条不同线路（省份+ISP）的记录，`dig +subnet=` 精确匹配、无 ECS 随机、境外 IP 全兜底三种场景全部符合预期，行为跟 CDN 模式已有的 `handler_test.go` 用例一致。只支持内置线路（`country:`/`province:`/`isp:` 前缀），不支持自定义 IP 段/CIDR/地域线路，跟 CDN 模式实际能力对齐。详细设计写进了 `docs/ecs-geo-routing-design.md` 第 9 节。
+
+顺带把这次 `dig` 验证时发现的一个独立问题也修了：NS 记录/域名软删除（`DeleteNSRecord`/`DeleteNSDomain`）只改了 `state`，没有更新 `version` 列，而增量同步（`ListNSRecordsAfterVersion`/`ListNSDomainsAfterVersion`）是按 `version > ?` 过滤的——删除不动 version，等于对增量同步永久隐身，只能靠重启触发全量同步才清掉。两个 DAO 补上 `Set("version", time.Now().UnixNano())`（复用 Create/Update 同款生成方式），本机验证：不重启 dns-edge，纯等 10 秒轮询，删除的记录正确消失、落回通配符兜底。
+
+全程只在本机开发环境验证，**没有碰今天已经部署的贵州/新加坡测试环境**，代码也还没有提交推送。
+
 ## 2026-07-07
 
 ### 把 feature/ns-dns-edge 升级部署到同事共享的 admin/api 机器
