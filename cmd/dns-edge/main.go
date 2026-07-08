@@ -24,6 +24,14 @@ import (
 	"dns-edge/internal/weight"
 )
 
+// geoUpdaterIface is satisfied by both geo.Updater (GitHub) and
+// geo.APIUpdater (edgeapi) — main only needs to start/trigger whichever one
+// cfg.Geo.Source selected.
+type geoUpdaterIface interface {
+	CheckAndUpdate(force bool) error
+	Start(ctx context.Context)
+}
+
 func main() {
 	corefilePath := flag.String("config", "Corefile", "path to Corefile config")
 	autoMigrate := flag.Bool("auto-migrate", false, "run SQL schema before starting (idempotent, requires PG DSN)")
@@ -111,7 +119,11 @@ func main() {
 
 	// geo-routing (Phase 13): load xdb if configured
 	var geoRouter dnshandler.GeoLookup // interface — stays nil when xdb not configured
-	var geoUpdater *geo.Updater
+	var geoRouterPtr *geo.Router       // same value as geoRouter; typed concretely for updater wiring below
+	var geoUpdater geoUpdaterIface
+	// geoSourceIsAPI: cfg.Geo.Source defaults to the recommended "api" mode
+	// (pull from edgeapi) whenever it isn't explicitly set to "github".
+	geoSourceIsAPI := cfg.Geo.Source != "github"
 	if cfg.Geo.XDBPath != "" {
 		r, geoErr := geo.New(cfg.Geo.XDBPath)
 		if geoErr != nil {
@@ -131,19 +143,25 @@ func main() {
 		if r != nil {
 			defer r.Close()
 			geoRouter = r
+			geoRouterPtr = r
 
-			if cfg.Geo.AutoUpdate {
-				geoUpdater = geo.NewUpdater(geo.UpdaterConfig{
+			// The GitHub-based updater has no dependency on edgeagent, so it
+			// can be wired up right here. The API-based (default) updater
+			// needs the edgeagent connection as its data source, so it's
+			// wired up further below, once agent exists.
+			if cfg.Geo.AutoUpdate && !geoSourceIsAPI {
+				githubUpdater := geo.NewUpdater(geo.UpdaterConfig{
 					GithubToken:     cfg.Geo.GithubToken,
 					Interval:        cfg.Geo.UpdateInterval,
 					DownloadTimeout: 10 * time.Minute,
 				}, cfg.Geo.XDBPath, r, log)
+				geoUpdater = githubUpdater
 				// startup check in background (non-blocking). force=false is
 				// fine even for a brand-new deployment: CheckAndUpdate treats
 				// a missing local file as needing a download regardless of
 				// force, so this still bootstraps from zero.
 				go func() {
-					if err := geoUpdater.CheckAndUpdate(false); err != nil {
+					if err := githubUpdater.CheckAndUpdate(false); err != nil {
 						log.Warn("ip2region startup update check failed", zap.Error(err))
 					}
 				}()
@@ -163,9 +181,6 @@ func main() {
 	if pgSyncer != nil {
 		go pgSyncer.Start(ctx)
 	}
-	if geoUpdater != nil {
-		go geoUpdater.Start(ctx)
-	}
 
 	// edgeagent: poll edgeapi for NS tasks (nsConfigChanged / nsDomainChanged / nsRecordChanged)
 	if cfg.EdgeAgent.Endpoint != "" {
@@ -176,11 +191,72 @@ func main() {
 			zoneStore,
 			log,
 		)
+
+		// geo xdb auto-update, API mode (default/recommended): pull the
+		// currently-active ip2region artifact from edgeapi over the same
+		// authenticated gRPC connection agent already maintains, instead of
+		// reaching out to GitHub directly. Requires edgeagent to be
+		// configured since that's where the connection comes from.
+		//
+		// Wired up (SetIP2RegionChangedHandler) before agent.Run starts so
+		// there's no race with the poll loop reading the handler field.
+		if cfg.Geo.AutoUpdate && geoSourceIsAPI && geoRouterPtr != nil {
+			apiUpdater := geo.NewAPIUpdater(geo.APIUpdaterConfig{
+				Source:   agent,
+				Interval: cfg.Geo.UpdateInterval,
+			}, cfg.Geo.XDBPath, geoRouterPtr, log)
+			geoUpdater = apiUpdater
+
+			// edgeapi's optional GitHub auto-sync job broadcasts an
+			// nsIP2RegionChanged task when it activates a new artifact;
+			// agent's existing 10s task poll picks it up and calls this,
+			// so we don't have to wait for the (much longer) regular
+			// ip2region poll interval to notice.
+			agent.SetIP2RegionChangedHandler(func() {
+				if err := apiUpdater.CheckAndUpdate(true); err != nil {
+					log.Warn("ip2region update triggered by nsIP2RegionChanged task failed", zap.Error(err))
+				}
+			})
+
+			go func() {
+				// agent.Run's initial dial happens concurrently in its own
+				// goroutine and can easily still be in progress here, so a
+				// single attempt would routinely lose this race on a fresh
+				// start. Retry with backoff (same cap as agent's own
+				// dialWithRetry) until it succeeds or ctx is cancelled,
+				// instead of silently waiting for the next 24h tick.
+				backoff := time.Second
+				const maxBackoff = 30 * time.Second
+				for {
+					err := apiUpdater.CheckAndUpdate(false)
+					if err == nil {
+						break
+					}
+					log.Warn("ip2region startup update check (from edgeapi) failed, retrying",
+						zap.Error(err), zap.Duration("backoff", backoff))
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(backoff):
+					}
+					if backoff *= 2; backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				}
+			}()
+		}
+
 		go agent.Run(ctx)
 		log.Info("edgeagent started",
 			zap.String("endpoint", cfg.EdgeAgent.Endpoint),
 			zap.String("uniqueId", cfg.EdgeAgent.UniqueID),
 		)
+	} else if cfg.Geo.AutoUpdate && geoSourceIsAPI && cfg.Geo.XDBPath != "" {
+		log.Warn("geo xdb auto-update source is \"api\" but edgeagent.endpoint is not configured; geo xdb auto-update disabled")
+	}
+
+	if geoUpdater != nil {
+		go geoUpdater.Start(ctx)
 	}
 
 	udpSrv := &mdns.Server{Net: "udp", Addr: cfg.Listen, Handler: mux}

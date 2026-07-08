@@ -10,8 +10,11 @@ import (
 	"crypto/cipher"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"gitlab.gainetics.io/backend-cdn/goedge/edgecommon/pkg/rpc/pb"
@@ -34,6 +37,24 @@ type Agent struct {
 	uniqueID string
 	secret   string
 	endpoint string // host:port of edgeapi gRPC
+
+	clientMu                sync.RWMutex
+	ip2RegionArtifactClient pb.IPLibraryArtifactServiceClient
+	fileChunkClient         pb.FileChunkServiceClient
+
+	// onIP2RegionChanged, if set via SetIP2RegionChangedHandler, is invoked
+	// (in its own goroutine) whenever an nsIP2RegionChanged task arrives —
+	// edgeapi broadcasts this after its optional GitHub auto-sync job
+	// activates a new ip2region artifact, letting dns-edge refresh well
+	// before its own regular ip2region poll interval would have caught it.
+	onIP2RegionChanged func()
+}
+
+// SetIP2RegionChangedHandler registers a callback invoked whenever edgeapi
+// reports that the active ip2region artifact changed. Must be called before
+// Run, since Run's poll loop reads it without further synchronization.
+func (a *Agent) SetIP2RegionChangedHandler(fn func()) {
+	a.onIP2RegionChanged = fn
 }
 
 // New creates an Agent. endpoint is the edgeapi gRPC address (e.g. "127.0.0.1:8031").
@@ -68,6 +89,11 @@ func (a *Agent) Run(ctx context.Context) {
 	domainClient := pb.NewNSDomainServiceClient(conn)
 	recordClient := pb.NewNSRecordServiceClient(conn)
 	nsNodeClient := pb.NewNSNodeServiceClient(conn)
+
+	a.clientMu.Lock()
+	a.ip2RegionArtifactClient = pb.NewIPLibraryArtifactServiceClient(conn)
+	a.fileChunkClient = pb.NewFileChunkServiceClient(conn)
+	a.clientMu.Unlock()
 
 	a.log.Info("edgeagent: connected to edgeapi", zap.String("endpoint", a.endpoint))
 	a.reportStatus(ctx, nsNodeClient, true)
@@ -198,6 +224,11 @@ func (a *Agent) poll(
 			taskErr = a.syncDomains(ctx, domainClient, domainVersion)
 		case "nsRecordChanged":
 			taskErr = a.syncRecords(ctx, recordClient, recordVersion)
+		case "nsIP2RegionChanged":
+			if a.onIP2RegionChanged != nil {
+				go a.onIP2RegionChanged()
+			}
+			taskErr = nil
 		default:
 			// Unknown task types are acked as ok to avoid task queue buildup.
 		}
@@ -430,4 +461,63 @@ func (a *Agent) buildToken() (string, error) {
 	cipher.NewCFBEncrypter(block, iv).XORKeyStream(dst, payload)
 
 	return base64.StdEncoding.EncodeToString(dst), nil
+}
+
+// errNotConnected is returned by the IP2RegionSource methods below when Run
+// hasn't finished its initial dial yet; callers (internal/geo's API updater)
+// should treat it like any other transient network error and retry later.
+var errNotConnected = errors.New("edgeagent: not connected to edgeapi yet")
+
+// FindPublicArtifact implements geo.APISource, letting dns-edge pull its
+// ip2region xdb from edgeapi instead of downloading it from GitHub directly —
+// the same authenticated connection/clients Run() already maintains are
+// reused here, so no separate credentials are needed.
+func (a *Agent) FindPublicArtifact() (fileId int64, code string, err error) {
+	a.clientMu.RLock()
+	client := a.ip2RegionArtifactClient
+	a.clientMu.RUnlock()
+	if client == nil {
+		return 0, "", errNotConnected
+	}
+
+	resp, err := client.FindPublicIPLibraryArtifact(context.Background(), &pb.FindPublicIPLibraryArtifactRequest{Format: "ip2region"})
+	if err != nil {
+		return 0, "", err
+	}
+	var artifact = resp.IpLibraryArtifact
+	if artifact == nil {
+		return 0, "", nil
+	}
+	return artifact.FileId, artifact.Code, nil
+}
+
+// DownloadFile implements geo.APISource.
+func (a *Agent) DownloadFile(fileId int64, w io.Writer) error {
+	if fileId <= 0 {
+		return errors.New("invalid fileId")
+	}
+	a.clientMu.RLock()
+	client := a.fileChunkClient
+	a.clientMu.RUnlock()
+	if client == nil {
+		return errNotConnected
+	}
+
+	chunkIdsResp, err := client.FindAllFileChunkIds(context.Background(), &pb.FindAllFileChunkIdsRequest{FileId: fileId})
+	if err != nil {
+		return err
+	}
+	for _, chunkId := range chunkIdsResp.FileChunkIds {
+		chunkResp, err := client.DownloadFileChunk(context.Background(), &pb.DownloadFileChunkRequest{FileChunkId: chunkId})
+		if err != nil {
+			return err
+		}
+		if chunkResp.FileChunk == nil {
+			return fmt.Errorf("can not find file chunk with chunk id '%d'", chunkId)
+		}
+		if _, err := w.Write(chunkResp.FileChunk.Data); err != nil {
+			return err
+		}
+	}
+	return nil
 }

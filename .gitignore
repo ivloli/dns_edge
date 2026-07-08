@@ -3,6 +3,9 @@ Corefile
 
 # 运行时产物
 /tmp/nacos/
+/ip2region.xdb
+/.ip2region_api_code
+/.ip2region_release_tag
 
 # IDE
 .idea/
@@ -13,7 +16,7 @@ Corefile
 /dns-edge
 /dns-edge-local
 /dns-edge-local.log
-/release/*/dns-edge
+/release/
 /bin/
 
 # 本地一键部署用的 PID/日志目录

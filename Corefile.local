@@ -21,7 +21,6 @@ dns-edge {
     }
 
     geo {
-        xdb /home/ivloli/edge/static/ip2region.xdb
         auto_update     true
         update_interval 24h
     }

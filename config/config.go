@@ -18,19 +18,41 @@ type Config struct {
 	EdgeAgent EdgeAgentConfig
 }
 
+// DefaultXDBFilename is the ip2region xdb filename used when a "geo" block
+// is present but doesn't set "xdb" explicitly. Left as a bare relative name
+// (resolved against the process's working directory) so it lands under
+// whatever data directory the deployment already uses — mirrors GoEdge's own
+// Tea.Root/data/ convention; dns-edge's systemd unit sets WorkingDirectory to
+// its dedicated data dir for exactly this purpose. Customers installing
+// dns-edge never need to type a path for this.
+const DefaultXDBFilename = "ip2region.xdb"
+
 // GeoConfig holds settings for ip2region-based geo-routing.
 type GeoConfig struct {
 	// XDBPath is the path to the ip2region .xdb database file.
-	// Empty = geo-routing disabled.
+	// Empty = geo-routing disabled (no "geo" block at all in the Corefile).
+	// When a "geo" block IS present but doesn't set "xdb", this defaults to
+	// DefaultXDBFilename — see parseGeo.
 	XDBPath string
 
-	// AutoUpdate enables periodic xdb refresh from GitHub Releases.
+	// AutoUpdate enables periodic xdb refresh.
 	AutoUpdate bool
 
-	// UpdateInterval between release checks. Defaults to 24h.
+	// Source selects where AutoUpdate fetches a new xdb from:
+	//   "api"    (default, recommended) — pull from edgeapi via the same
+	//            gRPC connection edgeagent already maintains. Works in
+	//            customer deployments with no outbound internet access;
+	//            requires an admin to have uploaded+activated an ip2region
+	//            artifact in EdgeAdmin (系统设置 → IP2Region 库).
+	//   "github" — download directly from ip2region's GitHub Releases.
+	//            Only useful for internal dev/test boxes with GitHub access.
+	Source string
+
+	// UpdateInterval between update checks. Defaults to 24h.
 	UpdateInterval time.Duration
 
-	// GithubToken is an optional personal access token to avoid API rate limits.
+	// GithubToken is an optional personal access token to avoid API rate
+	// limits. Only used when Source == "github".
 	GithubToken string
 }
 

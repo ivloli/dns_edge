@@ -481,6 +481,9 @@ func (p *parser) parseGeo(cfg *GeoConfig) error {
 		}
 		if t.text == "}" {
 			p.next()
+			if cfg.XDBPath == "" {
+				cfg.XDBPath = DefaultXDBFilename
+			}
 			return nil
 		}
 		key, _ := p.next()
@@ -513,6 +516,15 @@ func (p *parser) parseGeo(cfg *GeoConfig) error {
 				return err
 			}
 			cfg.GithubToken = v
+		case "source":
+			v, err := p.nextVal(key)
+			if err != nil {
+				return err
+			}
+			if v != "api" && v != "github" {
+				return fmt.Errorf("line %d: geo source must be \"api\" or \"github\", got %q", key.line, v)
+			}
+			cfg.Source = v
 		default:
 			return fmt.Errorf("line %d: unknown key %q in geo block", key.line, key.text)
 		}
