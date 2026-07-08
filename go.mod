@@ -3,7 +3,7 @@ module dns-edge
 go 1.25.0
 
 require (
-	github.com/TeaOSLab/EdgeCommon v0.0.0-20260629092346-e89d80192045
+	gitlab.gainetics.io/backend-cdn/goedge/edgecommon v0.0.0-00010101000000-000000000000
 	github.com/gin-gonic/gin v1.12.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/lionsoul2014/ip2region/binding/golang v0.0.0-20260623020923-1068bf05a315
@@ -82,4 +82,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/TeaOSLab/EdgeCommon => /home/ivloli/Git_repo/EdgeCommon
+replace gitlab.gainetics.io/backend-cdn/goedge/edgecommon => ../Git_repo/edgecommon

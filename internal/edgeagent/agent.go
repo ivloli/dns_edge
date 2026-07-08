@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/TeaOSLab/EdgeCommon/pkg/rpc/pb"
+	"gitlab.gainetics.io/backend-cdn/goedge/edgecommon/pkg/rpc/pb"
 	mdns "github.com/miekg/dns"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
