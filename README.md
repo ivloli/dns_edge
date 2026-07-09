@@ -62,7 +62,9 @@ GoEdge EdgeAPI（edgeapi，MySQL）
 
 - Go 1.25+
 - Nacos 2.x（分流权重，可选）
-- ip2region.xdb（地理路由，可选）
+- ip2region.xdb（地理路由，可选）——**不需要手动准备文件**：默认从 edgeapi
+  自动拉取（管理员在 EdgeAdmin 上传或开启 GitHub 自动同步后，dns-edge 通过
+  `edgeagent` 已有的 gRPC 连接自动获取，见下方「地理路由」一节）
 - GoEdge EdgeAPI（记录同步，生产环境）
 - dnsdist 1.9+（仅 DoT 需要）
 
@@ -91,7 +93,10 @@ dns-edge {
         namespace  default
     }
     geo {
-        xdb  /etc/dns-edge/ip2region.xdb
+        # xdb 留空默认相对路径 "ip2region.xdb"，从 edgeapi 自动拉取
+        # （需要 edgeagent 块也配置好）；见下方「地理路由」一节
+        auto_update     true
+        update_interval 24h
     }
 }
 EOF
@@ -174,8 +179,17 @@ GoEdge EdgeAPI（中心，MySQL）
 基于 EDNS Client Subnet（RFC 7871）和 ip2region xdb 实现按地理位置分流：
 
 - 优先级：`省份+运营商 > 省份 > 运营商 > 国家 > 默认 > 全量`
-- xdb 支持自动更新（GitHub Releases 定期拉取，atomic 热替换）
-- `geo {}` 块缺失或 xdb 不存在时自动退化为纯权重模式
+- xdb 支持自动更新，两种来源（`geo.source` 配置，默认 `"api"`）：
+  - **`"api"`（默认/推荐）**：从 GoEdge EdgeAPI 拉取，管理员在 EdgeAdmin
+    「系统设置 → IP2Region 库」上传一次并激活，或者 edgeapi 开启可选的
+    GitHub 自动同步——dns-edge 复用 `edgeagent` 已有的 gRPC 连接去拉取，
+    不需要额外配置凭证，也不需要 dns-edge 自己能访问外网。EdgeAdmin 激活
+    新版本后会广播任务，dns-edge 近乎实时收到更新（不用等常规轮询周期）。
+  - **`"github"`**：dns-edge 自己直接连 ip2region 官方 GitHub Release 下载，
+    仅供没有 EdgeAPI 连接的内部开发/测试环境使用，客户现场部署不建议（很多
+    客户网络访问不了 GitHub）。
+- `xdb` 路径留空时默认相对路径 `"ip2region.xdb"`，不需要手动指定
+- `geo {}` 块缺失、或两种来源都暂时没有可用数据时自动退化为纯权重模式
 
 ## dnsdist 配置参考
 
@@ -199,7 +213,8 @@ dns-edge/
 │   ├── dns/             # DNS Handler，查询处理逻辑
 │   ├── store/           # ZoneStore，纯内存存储层
 │   ├── api/             # Gin HTTP API（含 GoEdge 接口）
-│   ├── geo/             # ip2region xdb 封装 + filterByGeo
+│   ├── geo/             # ip2region xdb 封装 + filterByGeo；api_updater.go（默认，从 edgeapi 拉）+ updater.go（GitHub 直连，内部开发/测试用）
+│   ├── edgeagent/       # NS 模式 gRPC agent；同时给 geo.APISource 提供实现
 │   ├── weight/          # WeightProvider（Nacos / Static / Composite）
 │   └── iface/           # 接口定义（ZoneStore、WeightProvider）
 ├── config/              # Corefile 解析
@@ -218,4 +233,8 @@ dns-edge/
 | `api {}` | `edgedns_access_key_secret` | edgeDNSAPI 鉴权 Key Secret |
 | `api {}` | `goedge_secret` | customHTTP Provider 共享密钥 |
 | `nacos {}` | `addr` | Nacos 地址（分流权重，可选） |
-| `geo {}` | `xdb` | ip2region xdb 文件路径（地理路由，可选） |
+| `edgeagent {}` | `endpoint`/`unique_id`/`secret` | NS 模式 gRPC 连接；`geo.source=api`（默认）时地理路由也复用这个连接 |
+| `geo {}` | `xdb` | ip2region xdb 本地缓存路径，留空默认 `"ip2region.xdb"` |
+| `geo {}` | `auto_update` | 是否自动更新 xdb |
+| `geo {}` | `source` | `"api"`（默认，从 edgeapi 拉取）或 `"github"`（直连 GitHub，内部开发/测试用） |
+| `geo {}` | `update_interval` | 自动更新检查间隔 |

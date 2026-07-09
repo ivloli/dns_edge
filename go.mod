@@ -3,7 +3,6 @@ module dns-edge
 go 1.25.0
 
 require (
-	gitlab.gainetics.io/backend-cdn/goedge/edgecommon v0.0.0-00010101000000-000000000000
 	github.com/gin-gonic/gin v1.12.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/lionsoul2014/ip2region/binding/golang v0.0.0-20260623020923-1068bf05a315
@@ -11,6 +10,7 @@ require (
 	github.com/nacos-group/nacos-sdk-go/v2 v2.2.7
 	github.com/prometheus/client_golang v1.12.2
 	github.com/stretchr/testify v1.11.1
+	gitlab.gainetics.io/backend-cdn/goedge/edgecommon v0.0.0-00010101000000-000000000000
 	go.uber.org/zap v1.27.0
 	google.golang.org/grpc v1.62.0
 )
@@ -41,6 +41,7 @@ require (
 	github.com/golang/mock v1.6.0 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/iwind/TeaGo v0.0.0-20230623080147-cd1e53b4915f // indirect
+	github.com/iwind/gosock v1.0.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
