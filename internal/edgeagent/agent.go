@@ -410,8 +410,19 @@ func (a *Agent) applyRecord(r *pb.NSRecord) error {
 	return a.store.PutRecord(targetApex, rec)
 }
 
+// rpcCallTimeout bounds every unary RPC agent makes to edgeapi. Run()'s
+// initial full sync and poll()'s per-tick calls all share the same
+// long-lived, never-cancelled ctx (only cancelled on process shutdown) — a
+// single request that hangs (server-side stall, half-open TCP, etc.) would
+// otherwise wedge the goroutine forever: no more polling, no more syncing,
+// and no log output to even signal it happened, since the hang occurs
+// mid-call. Applied here in the interceptor so every call site is covered
+// without having to remember to wrap each one individually.
+const rpcCallTimeout = 15 * time.Second
+
 // authInterceptor returns a gRPC UnaryClientInterceptor that attaches
-// nodeid + token metadata to every outgoing RPC call.
+// nodeid + token metadata to every outgoing RPC call, and bounds it with
+// rpcCallTimeout so a hung call can't wedge the agent forever.
 //
 // Protocol (matches edgeapi ValidateRequest):
 //   - metadata "nodeid" = a.uniqueID
@@ -422,6 +433,8 @@ func (a *Agent) authInterceptor() grpc.UnaryClientInterceptor {
 		if err != nil {
 			return fmt.Errorf("edgeagent: build auth token: %w", err)
 		}
+		ctx, cancel := context.WithTimeout(ctx, rpcCallTimeout)
+		defer cancel()
 		md := metadata.Pairs("nodeid", a.uniqueID, "token", token)
 		ctx = metadata.NewOutgoingContext(ctx, md)
 		return invoker(ctx, method, req, reply, cc, opts...)
