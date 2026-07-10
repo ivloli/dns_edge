@@ -4,8 +4,13 @@ Corefile
 # 运行时产物
 /tmp/nacos/
 /ip2region.xdb
+/ip2region_v6.xdb
 /.ip2region_api_code
 /.ip2region_release_tag
+
+# 本地验证用的真实 ip2region xdb（体积大，不入库；geo 包的相关测试没有
+# 这两个文件时会自动 skip）
+/internal/geo/testdata/
 
 # IDE
 .idea/

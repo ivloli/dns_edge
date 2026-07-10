@@ -485,23 +485,23 @@ var errNotConnected = errors.New("edgeagent: not connected to edgeapi yet")
 // ip2region xdb from edgeapi instead of downloading it from GitHub directly —
 // the same authenticated connection/clients Run() already maintains are
 // reused here, so no separate credentials are needed.
-func (a *Agent) FindPublicArtifact() (fileId int64, code string, err error) {
+func (a *Agent) FindPublicArtifact() (v4FileId int64, v6FileId int64, code string, err error) {
 	a.clientMu.RLock()
 	client := a.ip2RegionArtifactClient
 	a.clientMu.RUnlock()
 	if client == nil {
-		return 0, "", errNotConnected
+		return 0, 0, "", errNotConnected
 	}
 
 	resp, err := client.FindPublicIPLibraryArtifact(context.Background(), &pb.FindPublicIPLibraryArtifactRequest{Format: "ip2region"})
 	if err != nil {
-		return 0, "", err
+		return 0, 0, "", err
 	}
 	var artifact = resp.IpLibraryArtifact
 	if artifact == nil {
-		return 0, "", nil
+		return 0, 0, "", nil
 	}
-	return artifact.FileId, artifact.Code, nil
+	return artifact.FileId, artifact.V6FileId, artifact.Code, nil
 }
 
 // DownloadFile implements geo.APISource.

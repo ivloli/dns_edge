@@ -78,7 +78,7 @@ func TestRouter_Lookup_NilIP_ReturnsZero(t *testing.T) {
 }
 
 func TestRouter_Lookup_InvalidXDB_ReturnsZero(t *testing.T) {
-	_, err := geo.New("/nonexistent/path.xdb")
+	_, err := geo.New("/nonexistent/path.xdb", "/nonexistent/path_v6.xdb")
 	assert.Error(t, err)
 }
 
@@ -91,7 +91,7 @@ func newNilRouter(t *testing.T) *geo.Router {
 	//
 	// If you have a real ip2region.xdb available, set IPDB env and use
 	// TestRouter_Lookup_RealXDB below.
-	r, err := geo.New("/nonexistent.xdb")
+	r, err := geo.New("/nonexistent.xdb", "/nonexistent_v6.xdb")
 	if err != nil {
 		// Expected; return a dummy to avoid nil deref in Lookup(nil).
 		// We test nil-IP guard indirectly through Match tests on zero GeoInfo.
@@ -136,13 +136,30 @@ func TestParseRegion_ZeroFields(t *testing.T) {
 
 func TestRouter_Lookup_RealXDB(t *testing.T) {
 	xdbPath := "testdata/ip2region.xdb"
-	r, err := geo.New(xdbPath)
+	xdbPathV6 := "testdata/ip2region_v6.xdb"
+	r, err := geo.New(xdbPath, xdbPathV6)
 	if err != nil {
-		t.Skipf("no xdb at %s: %v", xdbPath, err)
+		t.Skipf("no xdb at %s / %s: %v", xdbPath, xdbPathV6, err)
 	}
 	defer r.Close()
 
 	// 8.8.8.8 = Google DNS = United States
 	g := r.Lookup(net.ParseIP("8.8.8.8"))
 	assert.NotEmpty(t, g.Country, "expected a country for 8.8.8.8")
+}
+
+// TestRouter_Lookup_RealXDB_IPv6 uses the same real xdb pair as
+// TestRouter_Lookup_RealXDB but exercises the IPv6 (searcherV6) path.
+func TestRouter_Lookup_RealXDB_IPv6(t *testing.T) {
+	xdbPath := "testdata/ip2region.xdb"
+	xdbPathV6 := "testdata/ip2region_v6.xdb"
+	r, err := geo.New(xdbPath, xdbPathV6)
+	if err != nil {
+		t.Skipf("no xdb at %s / %s: %v", xdbPath, xdbPathV6, err)
+	}
+	defer r.Close()
+
+	// 2400:3200::1 = Alibaba Cloud public DNS = China
+	g := r.Lookup(net.ParseIP("2400:3200::1"))
+	assert.NotEmpty(t, g.Country, "expected a country for 2400:3200::1")
 }

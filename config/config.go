@@ -27,13 +27,24 @@ type Config struct {
 // dns-edge never need to type a path for this.
 const DefaultXDBFilename = "ip2region.xdb"
 
+// DefaultXDBV6Filename is the ip2region IPv6 xdb filename used when a "geo"
+// block is present but doesn't set "xdb_v6" explicitly — the v6 counterpart
+// of DefaultXDBFilename. An xdb.Searcher only serves the IP version it was
+// built from, so v4 and v6 always need separate files.
+const DefaultXDBV6Filename = "ip2region_v6.xdb"
+
 // GeoConfig holds settings for ip2region-based geo-routing.
 type GeoConfig struct {
-	// XDBPath is the path to the ip2region .xdb database file.
+	// XDBPath is the path to the ip2region IPv4 .xdb database file.
 	// Empty = geo-routing disabled (no "geo" block at all in the Corefile).
 	// When a "geo" block IS present but doesn't set "xdb", this defaults to
 	// DefaultXDBFilename — see parseGeo.
 	XDBPath string
+
+	// XDBPathV6 is the path to the ip2region IPv6 .xdb database file.
+	// When a "geo" block IS present but doesn't set "xdb_v6", this defaults
+	// to DefaultXDBV6Filename — see parseGeo.
+	XDBPathV6 string
 
 	// AutoUpdate enables periodic xdb refresh.
 	AutoUpdate bool

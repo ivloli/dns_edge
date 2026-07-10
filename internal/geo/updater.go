@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-
-	"github.com/lionsoul2014/ip2region/binding/golang/xdb"
 )
 
 // UpdaterConfig controls automatic xdb updates from GitHub Releases.
@@ -41,16 +39,17 @@ type UpdaterConfig struct {
 // Updater periodically checks for a newer ip2region release and hot-reloads
 // the Router when a new version is found.
 type Updater struct {
-	cfg     UpdaterConfig
-	xdbPath string // path where the v4 xdb is stored / should be written
-	router  *Router
-	log     *zap.Logger
-	client  *http.Client
+	cfg       UpdaterConfig
+	xdbPath   string // path where the v4 xdb is stored / should be written
+	xdbPathV6 string // path where the v6 xdb is stored / should be written
+	router    *Router
+	log       *zap.Logger
+	client    *http.Client
 }
 
-// NewUpdater creates an Updater for the given Router and xdb file path.
+// NewUpdater creates an Updater for the given Router and xdb file paths.
 // Call Start(ctx) in a goroutine to begin periodic checks.
-func NewUpdater(cfg UpdaterConfig, xdbPath string, router *Router, log *zap.Logger) *Updater {
+func NewUpdater(cfg UpdaterConfig, xdbPath string, xdbPathV6 string, router *Router, log *zap.Logger) *Updater {
 	if cfg.ReleasesURL == "" {
 		cfg.ReleasesURL = "https://api.github.com/repos/lionsoul2014/ip2region/releases/latest"
 	}
@@ -64,11 +63,12 @@ func NewUpdater(cfg UpdaterConfig, xdbPath string, router *Router, log *zap.Logg
 		cfg.VersionFile = filepath.Join(filepath.Dir(xdbPath), ".ip2region_release_tag")
 	}
 	return &Updater{
-		cfg:     cfg,
-		xdbPath: xdbPath,
-		router:  router,
-		log:     log,
-		client:  &http.Client{Timeout: cfg.DownloadTimeout},
+		cfg:       cfg,
+		xdbPath:   xdbPath,
+		xdbPathV6: xdbPathV6,
+		router:    router,
+		log:       log,
+		client:    &http.Client{Timeout: cfg.DownloadTimeout},
 	}
 }
 
@@ -82,7 +82,7 @@ func (u *Updater) CheckAndUpdate(force bool) error {
 	}
 
 	localTag := u.readLocalVersion()
-	missing := fileMissing(u.xdbPath)
+	missing := fileMissing(u.xdbPath) || fileMissing(u.xdbPathV6)
 
 	if !force && !missing && localTag == rel.TagName {
 		u.log.Debug("ip2region xdb is up to date", zap.String("tag", rel.TagName))
@@ -94,11 +94,15 @@ func (u *Updater) CheckAndUpdate(force bool) error {
 		return fmt.Errorf("download: %w", err)
 	}
 
-	newSearcher, err := loadSearcher(u.xdbPath)
+	newSearcherV4, err := loadSearcher(u.xdbPath)
 	if err != nil {
-		return fmt.Errorf("load new xdb: %w", err)
+		return fmt.Errorf("load new v4 xdb: %w", err)
 	}
-	u.router.swap(newSearcher)
+	newSearcherV6, err := loadSearcher(u.xdbPathV6)
+	if err != nil {
+		return fmt.Errorf("load new v6 xdb: %w", err)
+	}
+	u.router.swap(newSearcherV4, newSearcherV6)
 
 	if err := os.WriteFile(u.cfg.VersionFile, []byte(rel.TagName+"\n"), 0644); err != nil {
 		u.log.Warn("failed to write version file", zap.Error(err))
@@ -162,8 +166,16 @@ func (u *Updater) readLocalVersion() string {
 	return strings.TrimSpace(string(b))
 }
 
+// downloadAndExtract downloads the release tarball once and extracts both
+// data/ip2region_v4.xdb and data/ip2region_v6.xdb from the same pass —
+// either one missing is a hard error, since an xdb.Searcher only serves the
+// IP version it was built from and a v4-only result would silently break
+// IPv6 lookups downstream.
 func (u *Updater) downloadAndExtract(rel *githubRelease) error {
 	if err := os.MkdirAll(filepath.Dir(u.xdbPath), 0755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(u.xdbPathV6), 0755); err != nil {
 		return err
 	}
 	req, err := http.NewRequest("GET", rel.TarballURL, nil)
@@ -189,7 +201,9 @@ func (u *Updater) downloadAndExtract(rel *githubRelease) error {
 	defer gzr.Close()
 	tr := tar.NewReader(gzr)
 
-	const targetSuffix = "data/ip2region_v4.xdb"
+	const v4Suffix = "data/ip2region_v4.xdb"
+	const v6Suffix = "data/ip2region_v6.xdb"
+	var gotV4, gotV6 bool
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -202,12 +216,29 @@ func (u *Updater) downloadAndExtract(rel *githubRelease) error {
 			continue
 		}
 		name := strings.TrimPrefix(hdr.Name, "./")
-		if !strings.HasSuffix(name, targetSuffix) {
-			continue
+		switch {
+		case strings.HasSuffix(name, v4Suffix):
+			if err := writeAtomic(tr, u.xdbPath); err != nil {
+				return err
+			}
+			gotV4 = true
+		case strings.HasSuffix(name, v6Suffix):
+			if err := writeAtomic(tr, u.xdbPathV6); err != nil {
+				return err
+			}
+			gotV6 = true
 		}
-		return writeAtomic(tr, u.xdbPath)
+		if gotV4 && gotV6 {
+			break
+		}
 	}
-	return fmt.Errorf("tarball missing %s", targetSuffix)
+	if !gotV4 {
+		return fmt.Errorf("tarball missing %s", v4Suffix)
+	}
+	if !gotV6 {
+		return fmt.Errorf("tarball missing %s", v6Suffix)
+	}
+	return nil
 }
 
 // writeAtomic writes r to destPath via a temp file + rename (atomic on POSIX).
@@ -227,22 +258,6 @@ func writeAtomic(r io.Reader, destPath string) error {
 		return err
 	}
 	return os.Rename(tmp, destPath)
-}
-
-func loadSearcher(path string) (*xdb.Searcher, error) {
-	cBuff, err := xdb.LoadContentFromFile(path)
-	if err != nil {
-		return nil, err
-	}
-	header, err := xdb.LoadHeaderFromBuff(cBuff)
-	if err != nil {
-		return nil, err
-	}
-	ver, err := xdb.VersionFromHeader(header)
-	if err != nil {
-		return nil, err
-	}
-	return xdb.NewWithBuffer(ver, cBuff)
 }
 
 func fileMissing(path string) bool {

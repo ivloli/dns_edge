@@ -125,19 +125,19 @@ func main() {
 	// (pull from edgeapi) whenever it isn't explicitly set to "github".
 	geoSourceIsAPI := cfg.Geo.Source != "github"
 	if cfg.Geo.XDBPath != "" {
-		r, geoErr := geo.New(cfg.Geo.XDBPath)
+		r, geoErr := geo.New(cfg.Geo.XDBPath, cfg.Geo.XDBPathV6)
 		if geoErr != nil {
 			if !cfg.Geo.AutoUpdate {
-				log.Warn("geo-routing disabled: failed to load xdb", zap.String("path", cfg.Geo.XDBPath), zap.Error(geoErr))
+				log.Warn("geo-routing disabled: failed to load xdb", zap.String("path", cfg.Geo.XDBPath), zap.String("pathV6", cfg.Geo.XDBPathV6), zap.Error(geoErr))
 			} else {
 				// No local xdb yet (e.g. brand-new deployment) — start with an
 				// empty router (Lookup returns zero-value GeoInfo until the
 				// first download completes) and let the updater fetch it below.
-				log.Info("no local xdb found, will download on startup", zap.String("path", cfg.Geo.XDBPath), zap.Error(geoErr))
+				log.Info("no local xdb found, will download on startup", zap.String("path", cfg.Geo.XDBPath), zap.String("pathV6", cfg.Geo.XDBPathV6), zap.Error(geoErr))
 				r = &geo.Router{}
 			}
 		} else {
-			log.Info("geo-routing enabled", zap.String("xdb", cfg.Geo.XDBPath))
+			log.Info("geo-routing enabled", zap.String("xdb", cfg.Geo.XDBPath), zap.String("xdbV6", cfg.Geo.XDBPathV6))
 		}
 
 		if r != nil {
@@ -154,7 +154,7 @@ func main() {
 					GithubToken:     cfg.Geo.GithubToken,
 					Interval:        cfg.Geo.UpdateInterval,
 					DownloadTimeout: 10 * time.Minute,
-				}, cfg.Geo.XDBPath, r, log)
+				}, cfg.Geo.XDBPath, cfg.Geo.XDBPathV6, r, log)
 				geoUpdater = githubUpdater
 				// startup check in background (non-blocking). force=false is
 				// fine even for a brand-new deployment: CheckAndUpdate treats
@@ -204,7 +204,7 @@ func main() {
 			apiUpdater := geo.NewAPIUpdater(geo.APIUpdaterConfig{
 				Source:   agent,
 				Interval: cfg.Geo.UpdateInterval,
-			}, cfg.Geo.XDBPath, geoRouterPtr, log)
+			}, cfg.Geo.XDBPath, cfg.Geo.XDBPathV6, geoRouterPtr, log)
 			geoUpdater = apiUpdater
 
 			// edgeapi's optional GitHub auto-sync job broadcasts an

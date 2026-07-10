@@ -20,10 +20,11 @@ import (
 // connectivity to edgeapi (already required for NS sync to work at all),
 // not outbound internet access to GitHub.
 type APISource interface {
-	// FindPublicArtifact returns the fileId and a short version code for the
-	// ip2region artifact currently marked active on edgeapi. fileId <= 0
-	// means no ip2region artifact has been uploaded/activated yet.
-	FindPublicArtifact() (fileId int64, code string, err error)
+	// FindPublicArtifact returns the v4/v6 fileIds and a short version code
+	// for the ip2region artifact currently marked active on edgeapi.
+	// v4FileId/v6FileId <= 0 means no ip2region artifact has been
+	// uploaded/activated yet (the two are always created/activated together).
+	FindPublicArtifact() (v4FileId int64, v6FileId int64, code string, err error)
 
 	// DownloadFile writes the artifact's raw bytes to w.
 	DownloadFile(fileId int64, w io.Writer) error
@@ -45,15 +46,16 @@ type APIUpdaterConfig struct {
 // APIUpdater periodically checks edgeapi for a newer ip2region artifact,
 // downloads it if missing/outdated, and hot-reloads the given Router.
 type APIUpdater struct {
-	cfg     APIUpdaterConfig
-	xdbPath string
-	router  *Router
-	log     *zap.Logger
+	cfg       APIUpdaterConfig
+	xdbPath   string
+	xdbPathV6 string
+	router    *Router
+	log       *zap.Logger
 }
 
-// NewAPIUpdater creates an APIUpdater for the given Router and xdb file path.
+// NewAPIUpdater creates an APIUpdater for the given Router and xdb file paths.
 // Call Start(ctx) in a goroutine to begin periodic checks.
-func NewAPIUpdater(cfg APIUpdaterConfig, xdbPath string, router *Router, log *zap.Logger) *APIUpdater {
+func NewAPIUpdater(cfg APIUpdaterConfig, xdbPath string, xdbPathV6 string, router *Router, log *zap.Logger) *APIUpdater {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 24 * time.Hour
 	}
@@ -61,10 +63,11 @@ func NewAPIUpdater(cfg APIUpdaterConfig, xdbPath string, router *Router, log *za
 		cfg.VersionFile = filepath.Join(filepath.Dir(xdbPath), ".ip2region_api_code")
 	}
 	return &APIUpdater{
-		cfg:     cfg,
-		xdbPath: xdbPath,
-		router:  router,
-		log:     log,
+		cfg:       cfg,
+		xdbPath:   xdbPath,
+		xdbPathV6: xdbPathV6,
+		router:    router,
+		log:       log,
 	}
 }
 
@@ -75,17 +78,17 @@ func NewAPIUpdater(cfg APIUpdaterConfig, xdbPath string, router *Router, log *za
 // already current — use force=false for normal startup/periodic checks (a
 // missing local file always triggers a download regardless of force).
 func (u *APIUpdater) CheckAndUpdate(force bool) error {
-	fileId, code, err := u.cfg.Source.FindPublicArtifact()
+	v4FileId, v6FileId, code, err := u.cfg.Source.FindPublicArtifact()
 	if err != nil {
 		return fmt.Errorf("find public ip2region artifact: %w", err)
 	}
-	if fileId <= 0 {
+	if v4FileId <= 0 || v6FileId <= 0 {
 		u.log.Debug("no ip2region artifact activated on edgeapi yet")
 		return nil
 	}
 
 	localCode := u.readLocalVersion()
-	missing := fileMissing(u.xdbPath)
+	missing := fileMissing(u.xdbPath) || fileMissing(u.xdbPathV6)
 
 	if !force && !missing && localCode == code {
 		u.log.Debug("ip2region xdb is up to date", zap.String("code", code))
@@ -93,15 +96,22 @@ func (u *APIUpdater) CheckAndUpdate(force bool) error {
 	}
 
 	u.log.Info("downloading ip2region xdb from edgeapi", zap.String("code", code), zap.String("from", localCode))
-	if err := u.downloadFrom(fileId); err != nil {
-		return fmt.Errorf("download from edgeapi: %w", err)
+	if err := u.downloadFrom(v4FileId, u.xdbPath); err != nil {
+		return fmt.Errorf("download v4 from edgeapi: %w", err)
+	}
+	if err := u.downloadFrom(v6FileId, u.xdbPathV6); err != nil {
+		return fmt.Errorf("download v6 from edgeapi: %w", err)
 	}
 
-	newSearcher, err := loadSearcher(u.xdbPath)
+	newSearcherV4, err := loadSearcher(u.xdbPath)
 	if err != nil {
-		return fmt.Errorf("load new xdb: %w", err)
+		return fmt.Errorf("load new v4 xdb: %w", err)
 	}
-	u.router.swap(newSearcher)
+	newSearcherV6, err := loadSearcher(u.xdbPathV6)
+	if err != nil {
+		return fmt.Errorf("load new v6 xdb: %w", err)
+	}
+	u.router.swap(newSearcherV4, newSearcherV6)
 
 	if err := os.WriteFile(u.cfg.VersionFile, []byte(code+"\n"), 0644); err != nil {
 		u.log.Warn("failed to write version file", zap.Error(err))
@@ -131,11 +141,11 @@ func (u *APIUpdater) readLocalVersion() string {
 	return strings.TrimSpace(string(b))
 }
 
-func (u *APIUpdater) downloadFrom(fileId int64) error {
-	if err := os.MkdirAll(filepath.Dir(u.xdbPath), 0755); err != nil {
+func (u *APIUpdater) downloadFrom(fileId int64, destPath string) error {
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return err
 	}
-	tmp := u.xdbPath + ".tmp"
+	tmp := destPath + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
 		return err
@@ -149,5 +159,5 @@ func (u *APIUpdater) downloadFrom(fileId int64) error {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, u.xdbPath)
+	return os.Rename(tmp, destPath)
 }

@@ -484,6 +484,9 @@ func (p *parser) parseGeo(cfg *GeoConfig) error {
 			if cfg.XDBPath == "" {
 				cfg.XDBPath = DefaultXDBFilename
 			}
+			if cfg.XDBPathV6 == "" {
+				cfg.XDBPathV6 = DefaultXDBV6Filename
+			}
 			return nil
 		}
 		key, _ := p.next()
@@ -494,6 +497,12 @@ func (p *parser) parseGeo(cfg *GeoConfig) error {
 				return err
 			}
 			cfg.XDBPath = v
+		case "xdb_v6":
+			v, err := p.nextVal(key)
+			if err != nil {
+				return err
+			}
+			cfg.XDBPathV6 = v
 		case "auto_update":
 			v, err := p.nextVal(key)
 			if err != nil {

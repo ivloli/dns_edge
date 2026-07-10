@@ -30,17 +30,89 @@ type GeoInfo struct {
 	ISP      string
 }
 
-// Router wraps an in-memory ip2region xdb searcher.
+// Router wraps a pair of in-memory ip2region xdb searchers, one per IP
+// version — an xdb.Searcher only serves the IP version it was built from
+// (see xdb.Searcher.Search), so IPv4 and IPv6 lookups need separate
+// searchers loaded from separate xdb files.
 // Safe for concurrent use.
 type Router struct {
-	mu       sync.RWMutex
-	searcher *xdb.Searcher
+	mu         sync.RWMutex
+	searcherV4 *xdb.Searcher
+	searcherV6 *xdb.Searcher
 }
 
-// New loads the xdb file entirely into memory and returns a Router.
-// Call Close when the Router is no longer needed.
-func New(xdbPath string) (*Router, error) {
-	cBuff, err := xdb.LoadContentFromFile(xdbPath)
+// New loads v4Path and v6Path entirely into memory and returns a Router.
+// Both files are required. Call Close when the Router is no longer needed.
+func New(v4Path string, v6Path string) (*Router, error) {
+	searcherV4, err := loadSearcher(v4Path)
+	if err != nil {
+		return nil, err
+	}
+	searcherV6, err := loadSearcher(v6Path)
+	if err != nil {
+		searcherV4.Close()
+		return nil, err
+	}
+	return &Router{searcherV4: searcherV4, searcherV6: searcherV6}, nil
+}
+
+// Close releases xdb resources.
+func (r *Router) Close() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.searcherV4 != nil {
+		r.searcherV4.Close()
+		r.searcherV4 = nil
+	}
+	if r.searcherV6 != nil {
+		r.searcherV6.Close()
+		r.searcherV6 = nil
+	}
+}
+
+// swap atomically replaces both underlying searchers with newly loaded ones.
+// The old searchers are closed. Called by the updater after a hot reload —
+// both are swapped inside the same lock so a concurrent Lookup never sees
+// one already updated while the other is still the old version.
+func (r *Router) swap(newSearcherV4 *xdb.Searcher, newSearcherV6 *xdb.Searcher) {
+	r.mu.Lock()
+	oldV4, oldV6 := r.searcherV4, r.searcherV6
+	r.searcherV4 = newSearcherV4
+	r.searcherV6 = newSearcherV6
+	r.mu.Unlock()
+	if oldV4 != nil {
+		oldV4.Close()
+	}
+	if oldV6 != nil {
+		oldV6.Close()
+	}
+}
+
+// Lookup returns geographic information for ip.
+// Returns zero-value GeoInfo (all empty) on any error or when ip is nil.
+func (r *Router) Lookup(ip net.IP) GeoInfo {
+	if ip == nil {
+		return GeoInfo{}
+	}
+	r.mu.RLock()
+	s := r.searcherV6
+	if ip.To4() != nil {
+		s = r.searcherV4
+	}
+	r.mu.RUnlock()
+	if s == nil {
+		return GeoInfo{}
+	}
+	raw, err := s.Search(ip.String())
+	if err != nil {
+		return GeoInfo{}
+	}
+	return parseRegion(raw)
+}
+
+// loadSearcher loads a single xdb file into memory.
+func loadSearcher(path string) (*xdb.Searcher, error) {
+	cBuff, err := xdb.LoadContentFromFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -52,52 +124,7 @@ func New(xdbPath string) (*Router, error) {
 	if err != nil {
 		return nil, err
 	}
-	searcher, err := xdb.NewWithBuffer(ver, cBuff)
-	if err != nil {
-		return nil, err
-	}
-	return &Router{searcher: searcher}, nil
-}
-
-// Close releases xdb resources.
-func (r *Router) Close() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.searcher != nil {
-		r.searcher.Close()
-		r.searcher = nil
-	}
-}
-
-// swap atomically replaces the underlying searcher with a newly loaded one.
-// The old searcher is closed. Called by the updater after a hot reload.
-func (r *Router) swap(newSearcher *xdb.Searcher) {
-	r.mu.Lock()
-	old := r.searcher
-	r.searcher = newSearcher
-	r.mu.Unlock()
-	if old != nil {
-		old.Close()
-	}
-}
-
-// Lookup returns geographic information for ip.
-// Returns zero-value GeoInfo (all empty) on any error or when ip is nil.
-func (r *Router) Lookup(ip net.IP) GeoInfo {
-	if ip == nil {
-		return GeoInfo{}
-	}
-	r.mu.RLock()
-	s := r.searcher
-	r.mu.RUnlock()
-	if s == nil {
-		return GeoInfo{}
-	}
-	raw, err := s.Search(ip.String())
-	if err != nil {
-		return GeoInfo{}
-	}
-	return parseRegion(raw)
+	return xdb.NewWithBuffer(ver, cBuff)
 }
 
 // parseRegion parses ip2region's pipe-separated result.
