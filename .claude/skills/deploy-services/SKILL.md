@@ -153,6 +153,198 @@ tail -15 <日志文件>
 
 按上表列出的拓扑，依次生成：新加坡机器 edgeapi 一段 → 贵州机器（dns-edge解压一次 + edge-admin一段 + 三个dns-edge实例各一段）。
 
+## 完整示例（2026-07-13 DoT/DoH 功能部署，供参照）
+
+这是一次真实跑通的完整流程，commit `1d22675`（dns_dev）/ `78109f95`（edgeapi）/ `eee2a744`（edgeadmin），可以当模板照抄，把 hash/sha256/路径换成当次实际值。
+
+**打包**（步骤4的产物）：
+```
+dns-edge-linux-amd64-1d22675.tar.gz : 4cc9046fcb9b70cafe67d169a572d88288e596e6f84e475ba8c115ac95330a8c
+edge-api-test-env.tar.gz            : 5d61d9e8fe241782f26cdef09cceef2e4a4ae7a7f39e4d7ec480b046296f32ed
+edge-admin-test-env.tar.gz          : e58dde2ea935628d0d735cad1e2000f49bfcf1012e32140fe7e9cff79e2ef433
+```
+
+**部署前检查结论**（这次实际判断出来的，仅供参照，每次都要重新判断）：DoT/DoH复用了已有的 `edgeNSClusters.tls`/`.doh` 列，**不需要ALTER TABLE**；两个功能默认关闭，部署后要提醒用户去EdgeAdmin对应NS集群的"TLS"/"DoH"设置页面上传证书、开启开关才会生效。
+
+**完整部署命令**（`pgrep -f` 版本，第一次用 `ss -tlnp | grep pid=` 那版在真实环境里翻车过——见下方"踩过的坑"）：
+
+```bash
+### 1. 新加坡机器：edgeapi（gRPC :8031）
+cd /data/go-edge-test/edge-api   # 按实际路径调整
+
+pgrep -af "bin/edge-api"
+OLD_PID=$(pgrep -f "bin/edge-api" | head -1)
+echo "OLD_PID=$OLD_PID"
+
+if [ -n "$OLD_PID" ]; then
+    kill "$OLD_PID"
+    for i in $(seq 1 10); do
+        kill -0 "$OLD_PID" 2>/dev/null || break
+        sleep 1
+    done
+    kill -0 "$OLD_PID" 2>/dev/null && { echo "强制kill -9"; kill -9 "$OLD_PID"; sleep 1; }
+else
+    echo "没找到运行中的edge-api，先别往下走，检查路径/进程名"
+fi
+
+ps aux | grep '[e]dge-api'
+ss -tlnp | grep 8031 || echo "8031已释放"
+
+cp bin/edge-api bin/edge-api.bak.$(date +%Y%m%d%H%M%S)
+cp ~/upgrade-staging/edge-api-latest/edge-api bin/edge-api
+chmod +x bin/edge-api
+
+nohup ./bin/edge-api >> logs/run.log 2>&1 &
+sleep 2
+ps aux | grep '[e]dge-api'
+ss -tlnp | grep 8031
+tail -15 logs/run.log
+
+
+### 2. 贵州机器：解压 dns-edge 包一次，三个实例共用
+cd ~/upgrade-staging
+sha256sum dns-edge-linux-amd64-1d22675.tar.gz
+# 期望：4cc9046fcb9b70cafe67d169a572d88288e596e6f84e475ba8c115ac95330a8c
+
+rm -rf dns-edge-latest
+mkdir -p dns-edge-latest
+tar -xzf dns-edge-linux-amd64-1d22675.tar.gz -C dns-edge-latest
+NEW_BIN=~/upgrade-staging/dns-edge-latest/dns-edge-linux-amd64-1d22675/dns-edge
+
+
+### 3. edge-admin（/data/go-edge/edge-admin）
+cd /data/go-edge/edge-admin
+sha256sum ~/upgrade-staging/edge-admin-test-env.tar.gz
+# 期望：e58dde2ea935628d0d735cad1e2000f49bfcf1012e32140fe7e9cff79e2ef433
+
+rm -rf ~/upgrade-staging/edge-admin-latest
+mkdir -p ~/upgrade-staging/edge-admin-latest
+tar -xzf ~/upgrade-staging/edge-admin-test-env.tar.gz -C ~/upgrade-staging/edge-admin-latest
+
+OLD_PID=$(pgrep -f "bin/edge-admin" | head -1)
+echo "OLD_PID=$OLD_PID"
+if [ -n "$OLD_PID" ]; then
+    kill "$OLD_PID"
+    for i in $(seq 1 10); do
+        kill -0 "$OLD_PID" 2>/dev/null || break
+        sleep 1
+    done
+    kill -0 "$OLD_PID" 2>/dev/null && { kill -9 "$OLD_PID"; sleep 1; }
+else
+    echo "没找到运行中的edge-admin，检查路径"
+fi
+ps aux | grep '[e]dge-admin'
+ss -tlnp | grep 7788 || echo "7788已释放"
+
+cp bin/edge-admin bin/edge-admin.bak.$(date +%Y%m%d%H%M%S)
+cp -r web web.bak.$(date +%Y%m%d%H%M%S)
+cp ~/upgrade-staging/edge-admin-latest/edge-admin bin/edge-admin
+chmod +x bin/edge-admin
+rm -rf web
+cp -r ~/upgrade-staging/edge-admin-latest/web web
+
+nohup ./bin/edge-admin >> logs/run.log 2>&1 &
+sleep 2
+ps aux | grep '[e]dge-admin'
+ss -tlnp | grep 7788
+tail -15 logs/run.log
+
+
+### 4. dns-edge 实例1（/data/go-edge/dns-edge，:5300，二进制在 bin/）
+cd /data/go-edge/dns-edge
+OLD_PID=$(pgrep -f "bin/dns-edge" | head -1)
+echo "OLD_PID=$OLD_PID"
+if [ -n "$OLD_PID" ]; then
+    kill "$OLD_PID"
+    for i in $(seq 1 10); do
+        kill -0 "$OLD_PID" 2>/dev/null || break
+        sleep 1
+    done
+    kill -0 "$OLD_PID" 2>/dev/null && { kill -9 "$OLD_PID"; sleep 1; }
+else
+    echo "没找到运行中的实例1，检查路径"
+fi
+ps aux | grep '[d]ns-edge'
+ss -tlnp | grep -E ':5300|:8080' || echo "端口已释放"
+
+cp bin/dns-edge bin/dns-edge.bak.$(date +%Y%m%d%H%M%S)
+cp "$NEW_BIN" bin/dns-edge
+chmod +x bin/dns-edge
+
+nohup ./bin/dns-edge -config Corefile >> logs/run.log 2>&1 &
+sleep 3
+ps aux | grep '[d]ns-edge'
+ss -tlnp | grep -E ':5300|:8080'
+tail -20 logs/run.log
+curl -s http://127.0.0.1:8080/healthz
+
+
+### 5. dns-edge 实例2（/data/go-edge/dns-edge-instance2，:5301，二进制在根目录）
+cd /data/go-edge/dns-edge-instance2
+OLD_PID=$(pgrep -f "dns-edge-instance2/dns-edge" | head -1)
+echo "OLD_PID=$OLD_PID"
+if [ -n "$OLD_PID" ]; then
+    kill "$OLD_PID"
+    for i in $(seq 1 10); do
+        kill -0 "$OLD_PID" 2>/dev/null || break
+        sleep 1
+    done
+    kill -0 "$OLD_PID" 2>/dev/null && { kill -9 "$OLD_PID"; sleep 1; }
+else
+    echo "没找到运行中的实例2，检查路径"
+fi
+ss -tlnp | grep -E ':5301|:8081' || echo "端口已释放"
+
+cp dns-edge dns-edge.bak.$(date +%Y%m%d%H%M%S)
+cp "$NEW_BIN" dns-edge
+chmod +x dns-edge
+
+nohup ./dns-edge -config Corefile >> run.log 2>&1 &
+sleep 3
+ss -tlnp | grep -E ':5301|:8081'
+tail -20 run.log
+curl -s http://127.0.0.1:8081/healthz
+
+
+### 6. dns-edge 实例3（/data/go-edge/dns-edge-instance3，:5302，二进制在根目录）
+cd /data/go-edge/dns-edge-instance3
+OLD_PID=$(pgrep -f "dns-edge-instance3/dns-edge" | head -1)
+echo "OLD_PID=$OLD_PID"
+if [ -n "$OLD_PID" ]; then
+    kill "$OLD_PID"
+    for i in $(seq 1 10); do
+        kill -0 "$OLD_PID" 2>/dev/null || break
+        sleep 1
+    done
+    kill -0 "$OLD_PID" 2>/dev/null && { kill -9 "$OLD_PID"; sleep 1; }
+else
+    echo "没找到运行中的实例3，检查路径"
+fi
+ss -tlnp | grep -E ':5302|:8082' || echo "端口已释放"
+
+cp dns-edge dns-edge.bak.$(date +%Y%m%d%H%M%S)
+cp "$NEW_BIN" dns-edge
+chmod +x dns-edge
+
+nohup ./dns-edge -config Corefile >> run.log 2>&1 &
+sleep 3
+ss -tlnp | grep -E ':5302|:8082'
+tail -20 run.log
+curl -s http://127.0.0.1:8082/healthz
+```
+
+**踩过的坑（第一版命令用 `ss` 解析PID，在新加坡机器上翻车的真实案例）**：
+
+```
+-bash: kill: `': not a pid or valid job spec
+cp: cannot create regular file 'bin/edge-api': Text file busy
+[1] 1625544
+[1]+  Done   nohup ./bin/edge-api >> logs/run.log 2>&1
+... start local sock failed: error: the process is already running, pid: 1520946
+```
+
+根因链条：`OLD_PID=$(ss -tlnp | grep ':8031 ' | grep -oP 'pid=\K[0-9]+' | head -1)` 在那台机器上没提取到PID（`ss` 输出格式或权限问题，没深究）→ `$OLD_PID` 是空字符串 → `kill ""` 直接报错但脚本没有检查这个失败就继续往下走 → 老进程（`1520946`）一直没死 → `cp` 覆盖正在运行的二进制被内核拒绝（`Text file busy`）→ 新启动的进程检测到老进程的本地sock锁，打印错误后自己退出 → **表面上看着流程都跑完了，实际上老进程从头到尾没被换掉，新代码根本没生效**。这是这个skill坚持"每一步都先检查OLD_PID是不是空、kill之后要循环确认真的退出"的直接原因，不是过度设计。
+
 ## 已知不在本skill范围内的事
 
 - 不负责往 `test` 分支之外的其他分支同步
