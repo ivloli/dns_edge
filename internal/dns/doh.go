@@ -120,6 +120,16 @@ func (h *Handler) ServeDoH(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	// Same "most resolvers never send ECS" fallback ServeDNS applies
+	// (handler.go's remoteIP) — use the HTTP connection's peer address
+	// instead of leaving clientIP nil and skipping geo-routing entirely.
+	if clientIP == nil {
+		host, _, err := net.SplitHostPort(req.RemoteAddr)
+		if err == nil {
+			clientIP = net.ParseIP(host)
+		}
+	}
+
 	h.log.Debug("doh query",
 		zap.String("name", q.Name),
 		zap.String("type", mdns.TypeToString[q.Qtype]),

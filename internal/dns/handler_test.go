@@ -342,6 +342,14 @@ type fakeGeo struct {
 
 func (f *fakeGeo) Lookup(_ net.IP) geo.GeoInfo { return f.info }
 
+// mapGeo is a GeoLookup stub keyed by exact IP string, for tests that need
+// to prove a *specific* IP value reached h.geo.Lookup (fakeGeo ignores its
+// argument entirely, so it can't distinguish "the right IP got through"
+// from "some IP got through").
+type mapGeo map[string]geo.GeoInfo
+
+func (m mapGeo) Lookup(ip net.IP) geo.GeoInfo { return m[ip.String()] }
+
 func newGeoHandler(store iface.ZoneStore, g dnshandler.GeoLookup) *dnshandler.Handler {
 	return dnshandler.NewHandler(store, &testutil.MockWeightProvider{}, nil, 0, zap.NewNop(), g)
 }
@@ -425,8 +433,12 @@ func TestGeoRouting_NoGeo_AllCandidates(t *testing.T) {
 	assert.True(t, seen["2.2.2.2"], "default record should appear without geo filter")
 }
 
-func TestGeoRouting_NilClientIP_AllCandidates(t *testing.T) {
-	// Even with a geo router, nil clientIP (no ECS) → all records are candidates.
+func TestGeoRouting_NoECS_FallsBackToRemoteAddr(t *testing.T) {
+	// No ECS in the query, but the geo router IS configured — clientIP
+	// should fall back to the query's actual source address (handler.go's
+	// remoteIP) rather than staying nil, so geo-routing still applies. Most
+	// real resolvers never send ECS, so this fallback is what makes
+	// geo-routing work for the common case, not just the +subnet= case.
 	recDefault := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
 	recDefault.RouteTags = ""
 	recShanghai := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
@@ -438,19 +450,49 @@ func TestGeoRouting_NilClientIP_AllCandidates(t *testing.T) {
 		},
 	}
 
-	g := &fakeGeo{info: geo.GeoInfo{Country: "中国", Province: "上海", ISP: "电信"}}
+	// mapGeo only recognizes this exact IP — if the wrong IP (or none)
+	// reached h.geo.Lookup, the lookup misses and returns the zero-value
+	// GeoInfo, which matches nothing and falls through to the default record.
+	remoteAddr := &net.UDPAddr{IP: net.ParseIP("9.8.7.6"), Port: 5353}
+	g := mapGeo{"9.8.7.6": geo.GeoInfo{Country: "中国", Province: "上海", ISP: "电信"}}
 	h := newGeoHandler(store, g)
 
-	// query without ECS → clientIP = nil → geo filter skipped
-	seen := map[string]bool{}
-	for i := 0; i < 50; i++ {
-		rw := testutil.NewFakeRW()
+	for i := 0; i < 20; i++ {
+		rw := testutil.NewFakeRWWithAddr(remoteAddr)
 		h.ServeDNS(rw, makeQuery("www.example.com.", mdns.TypeA))
-		if len(rw.LastMsg().Answer) > 0 {
-			seen[rw.LastMsg().Answer[0].(*mdns.A).A.String()] = true
-		}
+		require.Len(t, rw.LastMsg().Answer, 1)
+		a := rw.LastMsg().Answer[0].(*mdns.A)
+		assert.Equal(t, "2.2.2.2", a.A.String(), "remote addr's geo should drive province routing even without ECS")
 	}
-	assert.True(t, seen["1.1.1.1"] || seen["2.2.2.2"], "some record should be returned")
+}
+
+func TestGeoRouting_ECS_TakesPriorityOverRemoteAddr(t *testing.T) {
+	// When both an ECS option AND a remote address are available, ECS wins —
+	// it's the resolver explicitly telling us the real client's subnet,
+	// which is more trustworthy than the resolver's own connecting IP.
+	recDefault := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
+	recDefault.RouteTags = ""
+	recShanghai := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
+	recShanghai.RouteTags = "province=上海"
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recDefault, recShanghai}
+		},
+	}
+
+	g := mapGeo{
+		"1.2.3.4": geo.GeoInfo{Country: "中国", Province: "上海", ISP: "电信"}, // ECS address
+		"9.8.7.6": geo.GeoInfo{Country: "中国", Province: "广东", ISP: "电信"}, // remote addr — different province, no matching record
+	}
+	h := newGeoHandler(store, g)
+
+	remoteAddr := &net.UDPAddr{IP: net.ParseIP("9.8.7.6"), Port: 5353}
+	rw := testutil.NewFakeRWWithAddr(remoteAddr)
+	h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("1.2.3.4")))
+	require.Len(t, rw.LastMsg().Answer, 1)
+	a := rw.LastMsg().Answer[0].(*mdns.A)
+	assert.Equal(t, "2.2.2.2", a.A.String(), "ECS-supplied IP should be used, not the remote addr")
 }
 
 // ── Geo-routing fallback chain (province → ISP → country → default → all) ──

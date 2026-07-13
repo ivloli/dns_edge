@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"dns-edge/internal/geo"
 	"dns-edge/internal/iface"
 	"dns-edge/internal/testutil"
 )
@@ -148,6 +149,35 @@ func TestServeDoH_POST_MalformedMessage(t *testing.T) {
 	h.ServeDoH(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestServeDoH_NoECS_FallsBackToRemoteAddr(t *testing.T) {
+	// Same fallback as ServeDNS (handler.go's remoteIP), but sourced from
+	// the HTTP connection's peer address instead of a UDP/TCP one — DoH
+	// clients essentially never send ECS in practice, so without this
+	// fallback geo-routing would never trigger over DoH at all.
+	recDefault := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
+	recDefault.RouteTags = ""
+	recShanghai := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
+	recShanghai.RouteTags = "province=上海"
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recDefault, recShanghai}
+		},
+	}
+	g := mapGeo{"9.8.7.6": geo.GeoInfo{Country: "中国", Province: "上海", ISP: "电信"}}
+	h := newGeoHandler(store, g)
+
+	req := doPOST(t, packQuery(t, "www.example.com.", mdns.TypeA))
+	req.RemoteAddr = "9.8.7.6:54321"
+	w := httptest.NewRecorder()
+	h.ServeDoH(w, req)
+
+	m := unpackResponse(t, w)
+	require.Len(t, m.Answer, 1)
+	a := m.Answer[0].(*mdns.A)
+	assert.Equal(t, "2.2.2.2", a.A.String(), "DoH peer address should drive province routing even without ECS")
 }
 
 func TestServeDoH_AXFR_NotImplemented(t *testing.T) {

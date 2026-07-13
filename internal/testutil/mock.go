@@ -148,7 +148,7 @@ func (m *MockIncrementalLoader) IncrementalLoad(ctx context.Context, since time.
 // FakeRW is a fake mdns.ResponseWriter that captures every WriteMsg call.
 // Use NewFakeRW (UDP) or NewFakeTCPRW (TCP) to control what RemoteAddr returns.
 type FakeRW struct {
-	Msgs []* mdns.Msg
+	Msgs []*mdns.Msg
 	addr net.Addr
 }
 
@@ -164,18 +164,25 @@ func NewFakeTCPRW() *FakeRW {
 	return &FakeRW{addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345}}
 }
 
+// NewFakeRWWithAddr returns a fake writer reporting an arbitrary RemoteAddr —
+// for tests that need to prove a *specific* source IP flows through as the
+// no-ECS geo-routing fallback (NewFakeRW/NewFakeTCPRW always say 127.0.0.1).
+func NewFakeRWWithAddr(addr net.Addr) *FakeRW {
+	return &FakeRW{addr: addr}
+}
+
 func (f *FakeRW) WriteMsg(m *mdns.Msg) error {
 	cp := m.Copy()
 	f.Msgs = append(f.Msgs, cp)
 	return nil
 }
-func (f *FakeRW) LocalAddr() net.Addr      { return f.addr }
-func (f *FakeRW) RemoteAddr() net.Addr     { return f.addr }
+func (f *FakeRW) LocalAddr() net.Addr         { return f.addr }
+func (f *FakeRW) RemoteAddr() net.Addr        { return f.addr }
 func (f *FakeRW) Write(b []byte) (int, error) { return len(b), nil }
-func (f *FakeRW) Close() error             { return nil }
-func (f *FakeRW) TsigStatus() error        { return nil }
-func (f *FakeRW) TsigTimersOnly(bool)      {}
-func (f *FakeRW) Hijack()                  {}
+func (f *FakeRW) Close() error                { return nil }
+func (f *FakeRW) TsigStatus() error           { return nil }
+func (f *FakeRW) TsigTimersOnly(bool)         {}
+func (f *FakeRW) Hijack()                     {}
 
 // LastMsg returns the last message written, or nil if no messages were sent.
 func (f *FakeRW) LastMsg() *mdns.Msg {
@@ -202,14 +209,14 @@ func NewNullTCPRW() *NullRW {
 	return &NullRW{addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345}}
 }
 
-func (n *NullRW) WriteMsg(*mdns.Msg) error     { return nil }
-func (n *NullRW) Write(b []byte) (int, error)  { return len(b), nil }
-func (n *NullRW) LocalAddr() net.Addr          { return n.addr }
-func (n *NullRW) RemoteAddr() net.Addr         { return n.addr }
-func (n *NullRW) Close() error                 { return nil }
-func (n *NullRW) TsigStatus() error            { return nil }
-func (n *NullRW) TsigTimersOnly(bool)          {}
-func (n *NullRW) Hijack()                      {}
+func (n *NullRW) WriteMsg(*mdns.Msg) error    { return nil }
+func (n *NullRW) Write(b []byte) (int, error) { return len(b), nil }
+func (n *NullRW) LocalAddr() net.Addr         { return n.addr }
+func (n *NullRW) RemoteAddr() net.Addr        { return n.addr }
+func (n *NullRW) Close() error                { return nil }
+func (n *NullRW) TsigStatus() error           { return nil }
+func (n *NullRW) TsigTimersOnly(bool)         {}
+func (n *NullRW) Hijack()                     {}
 
 // ── Record helpers ────────────────────────────────────────────────────────────
 

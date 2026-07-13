@@ -97,6 +97,20 @@ func (h *Handler) ServeDNS(w mdns.ResponseWriter, r *mdns.Msg) {
 		}
 	}
 
+	// Most real-world resolvers never send ECS — falling back to nil here
+	// would mean the overwhelming majority of queries skip geo-routing
+	// entirely (filterByGeo bails out on a nil clientIP). When no ECS was
+	// present, use the query's actual source address instead: for a query
+	// hitting dns-edge directly this is the real client; for one relayed
+	// through a resolver it's usually that resolver's own IP, which for the
+	// common case of an ISP's local recursive resolver still lands in the
+	// right region/ISP more often than not. This is strictly a fallback —
+	// an explicit ECS option (a resolver that actually knows the real
+	// client's subnet) always takes priority when present.
+	if clientIP == nil {
+		clientIP = remoteIP(w.RemoteAddr())
+	}
+
 	h.log.Debug("query",
 		zap.String("name", q.Name),
 		zap.String("type", mdns.TypeToString[q.Qtype]),
@@ -110,6 +124,21 @@ func (h *Handler) ServeDNS(w mdns.ResponseWriter, r *mdns.Msg) {
 	metrics.DNSQueryDuration.WithLabelValues(qtypeStr).Observe(time.Since(start).Seconds())
 
 	_ = w.WriteMsg(m)
+}
+
+// remoteIP extracts the IP from a net.Addr (a "host:port" string
+// underneath, for both UDP and TCP/TLS). Returns nil on any parse failure
+// rather than erroring — callers treat that identically to "no clientIP",
+// which just disables geo-routing for that one query.
+func remoteIP(addr net.Addr) net.IP {
+	if addr == nil {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return nil
+	}
+	return net.ParseIP(host)
 }
 
 // handleQuery populates m based on q. It never calls w.WriteMsg — that is
