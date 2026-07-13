@@ -42,6 +42,9 @@ type Agent struct {
 	ip2RegionArtifactClient pb.IPLibraryArtifactServiceClient
 	fileChunkClient         pb.FileChunkServiceClient
 
+	soaMu     sync.RWMutex
+	soaConfig *nsClusterSOAConfig // cluster-level SOA config, refreshed via FindCurrentNSNodeConfig; nil until first fetch succeeds
+
 	// onIP2RegionChanged, if set via SetIP2RegionChangedHandler, is invoked
 	// (in its own goroutine) whenever an nsIP2RegionChanged task arrives —
 	// edgeapi broadcasts this after its optional GitHub auto-sync job
@@ -117,6 +120,12 @@ func (a *Agent) Run(ctx context.Context) {
 	if err := a.syncRecords(ctx, recordClient, &recordVersion); err != nil {
 		a.log.Warn("edgeagent: initial record sync failed", zap.Error(err))
 	}
+	// Fetch the cluster's SOA config before the initial domain sync's zones
+	// would otherwise be created with a nil SOA (falling back to
+	// dns/handler.go's synthesized default) — order matters here since
+	// syncDomains above already ran once; refreshSOA backfills any zone it
+	// just created via SetSOA.
+	a.refreshSOA(ctx, nsNodeClient)
 
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -128,7 +137,7 @@ func (a *Agent) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			a.reportStatus(ctx, nsNodeClient, true)
-			a.poll(ctx, taskClient, domainClient, recordClient, &domainVersion, &recordVersion)
+			a.poll(ctx, taskClient, nsNodeClient, domainClient, recordClient, &domainVersion, &recordVersion)
 		}
 	}
 }
@@ -201,9 +210,94 @@ func (a *Agent) reportStatusOnShutdown(client pb.NSNodeServiceClient) {
 	a.reportStatus(shutdownCtx, client, false)
 }
 
+// nsClusterSOAConfig mirrors edgeapi's models.NSClusterSOAConfig — field
+// names must stay in sync since this is parsed out of a raw JSON blob
+// (FindCurrentNSNodeConfig's "soa" key), not a typed proto message.
+type nsClusterSOAConfig struct {
+	NS      string `json:"ns"`
+	Mbox    string `json:"mbox"`
+	Serial  uint32 `json:"serial"`
+	Refresh uint32 `json:"refresh"`
+	Retry   uint32 `json:"retry"`
+	Expire  uint32 `json:"expire"`
+	MinTTL  uint32 `json:"minttl"`
+}
+
+// buildSOA constructs the SOA record for apex's zone from the currently
+// cached cluster SOA config. NS/Mbox fall back to "ns1.<apex>"/
+// "hostmaster.<apex>" when unset (admin left them blank), matching
+// dns/handler.go's syntheticSOA fallback so the two code paths behave
+// identically for an unconfigured cluster.
+func (a *Agent) buildSOA(apex string) *mdns.SOA {
+	a.soaMu.RLock()
+	cfg := a.soaConfig
+	a.soaMu.RUnlock()
+
+	if cfg == nil {
+		cfg = &nsClusterSOAConfig{Serial: 1, Refresh: 3600, Retry: 900, Expire: 604800, MinTTL: 300}
+	}
+	ns := cfg.NS
+	if ns == "" {
+		ns = "ns1." + apex
+	}
+	mbox := cfg.Mbox
+	if mbox == "" {
+		mbox = "hostmaster." + apex
+	}
+	return &mdns.SOA{
+		Hdr:     mdns.RR_Header{Name: apex, Rrtype: mdns.TypeSOA, Class: mdns.ClassINET, Ttl: cfg.MinTTL},
+		Ns:      ns,
+		Mbox:    mbox,
+		Serial:  cfg.Serial,
+		Refresh: cfg.Refresh,
+		Retry:   cfg.Retry,
+		Expire:  cfg.Expire,
+		Minttl:  cfg.MinTTL,
+	}
+}
+
+// refreshSOA fetches the node's cluster SOA config via FindCurrentNSNodeConfig
+// and, if it changed since the last fetch, re-applies it to every zone
+// currently in the store. Errors are logged and swallowed — a stale/default
+// SOA is not worth failing the whole poll tick over, and dns/handler.go's
+// syntheticSOA already covers the "never successfully fetched" case.
+func (a *Agent) refreshSOA(ctx context.Context, client pb.NSNodeServiceClient) error {
+	resp, err := client.FindCurrentNSNodeConfig(ctx, &pb.FindCurrentNSNodeConfigRequest{})
+	if err != nil {
+		return fmt.Errorf("FindCurrentNSNodeConfig: %w", err)
+	}
+	if len(resp.NsNodeJSON) == 0 {
+		return nil
+	}
+
+	var payload struct {
+		SOA *nsClusterSOAConfig `json:"soa"`
+	}
+	if err := json.Unmarshal(resp.NsNodeJSON, &payload); err != nil {
+		return fmt.Errorf("decode node config: %w", err)
+	}
+	if payload.SOA == nil {
+		return nil
+	}
+
+	a.soaMu.Lock()
+	unchanged := a.soaConfig != nil && *a.soaConfig == *payload.SOA
+	a.soaConfig = payload.SOA
+	a.soaMu.Unlock()
+	if unchanged {
+		return nil
+	}
+
+	for apex := range a.store.Snapshot() {
+		_ = a.store.SetSOA(apex, a.buildSOA(apex))
+	}
+	return nil
+}
+
 func (a *Agent) poll(
 	ctx context.Context,
 	taskClient pb.NodeTaskServiceClient,
+	nsNodeClient pb.NSNodeServiceClient,
 	domainClient pb.NSDomainServiceClient,
 	recordClient pb.NSRecordServiceClient,
 	domainVersion, recordVersion *int64,
@@ -218,8 +312,12 @@ func (a *Agent) poll(
 		var taskErr error
 		switch task.Type {
 		case "nsConfigChanged":
-			// Node config changed — nothing to reload in ZoneStore itself; just ack.
-			taskErr = nil
+			// Covers both the node's own config and its cluster's — includes
+			// SOA/Hosts settings saved in EdgeAdmin's "集群设置" page
+			// (NSClusterDAO.NotifyUpdate broadcasts this same task type to
+			// the whole cluster). Re-fetch and apply the SOA config; no other
+			// per-node config currently needs reacting to here.
+			taskErr = a.refreshSOA(ctx, nsNodeClient)
 		case "nsDomainChanged":
 			taskErr = a.syncDomains(ctx, domainClient, domainVersion)
 		case "nsRecordChanged":
@@ -279,6 +377,7 @@ func (a *Agent) syncDomains(ctx context.Context, client pb.NSDomainServiceClient
 					_ = a.store.Update(&iface.Zone{
 						Name:    apex,
 						Records: make(map[iface.RecordKey][]*iface.Record),
+						SOA:     a.buildSOA(apex),
 					})
 				}
 			}

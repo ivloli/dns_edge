@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/miekg/dns"
+
 	"dns-edge/internal/iface"
 )
 
@@ -163,6 +165,25 @@ func (s *RWMutexStore) PutRecord(apex string, rec *iface.Record) error {
 	if old != nil {
 		newZone.SOA = old.SOA
 	}
+	s.zones[apex] = newZone
+	return nil
+}
+
+// SetSOA updates the SOA record for apex's zone using copy-on-write, without
+// touching its Records — mirrors PutRecord's pattern. No-op (zone stays
+// absent) when apex has no zone yet; the SOA is picked up automatically the
+// next time the zone is created via Update/PutRecord, since agent.go always
+// has the latest cached SOA on hand when it does that.
+func (s *RWMutexStore) SetSOA(apex string, soa *dns.SOA) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	old := s.zones[apex]
+	if old == nil {
+		return nil
+	}
+
+	newZone := &iface.Zone{Name: apex, Records: old.Records, SOA: soa}
 	s.zones[apex] = newZone
 	return nil
 }

@@ -59,6 +59,10 @@ type ZoneStore interface {
 	// Update atomically replaces (or inserts) an entire zone.
 	Update(zone *Zone) error
 
+	// SetSOA updates the SOA record for apex's zone without touching its
+	// Records (copy-on-write, mirrors PutRecord). No-op if apex has no zone.
+	SetSOA(apex string, soa *dns.SOA) error
+
 	// Delete removes a zone by its apex FQDN.
 	Delete(apex string) error
 
