@@ -104,33 +104,28 @@ sha256sum "$RELDIR"/*.tar.gz
 
 ### 6. 生成部署命令
 
-**核心原则：进程管理一律用 `pgrep -f`，不要用 `ss -tlnp | grep pid=` 解析PID**——后者在实际部署环境里出现过解析失败导致 `kill` 拿到空字符串、老进程没死、`cp` 覆盖正在运行的二进制报 `Text file busy`、新进程因为检测到老进程的本地锁而立刻退出，整个升级静默失败但看起来像是成功了。
+**核心原则：杀老进程直接用 `fuser -k` 对着文件本身操作，不要猜PID**——这是踩了三种不同PID识别方式的坑之后，最终收敛出来的最鲁棒方案：
 
-每个服务的标准升级模式（把 `<PATTERN>`/`<PORT>`/`<BINARY>` 换成具体值）：
+1. `ss -tlnp | grep pid=` 解析失败过（某台机器上`ss`没输出预期格式），导致 `$OLD_PID` 是空字符串，`kill ""` 报错但脚本没检查就往下走，老进程没死，`cp` 覆盖正在运行的二进制报 `Text file busy`，新进程因为检测到老进程的本地锁而立刻退出——整个升级静默失败但看着像是成功了。
+2. `pgrep -f "dns-edge-instance3/dns-edge"` 这种"假设目录名会出现在进程命令行里"的匹配也失败过——如果进程是 `cd` 进目标目录后用 `./dns-edge -config Corefile` 相对路径启动的，`cmdline`（`pgrep -f`匹配的对象）里根本不包含目录名，**工作目录不算进cmdline**。三个dns-edge实例如果都是同样方式启动，cmdline会完全一样，`pgrep -f "dns-edge"` 没法区分到底是哪一个，`head -1` 可能杀错/找不到目标实例。
+3. 用 `/proc/<pid>/cwd` 反查归属目录理论上更可靠，但现场排查这个要一步步来，用户等得不耐烦——最后还是 `fuser -k` 一次成功，干脆把它定成默认方案。
 
 ```bash
 cd <服务目录>
 
-OLD_PID=$(pgrep -f "<足够精确的命令行匹配串，比如 bin/edge-api 或 dns-edge-instance2/dns-edge>" | head -1)
-echo "OLD_PID=$OLD_PID"
-
-if [ -n "$OLD_PID" ]; then
-    kill "$OLD_PID"
-    for i in $(seq 1 10); do
-        kill -0 "$OLD_PID" 2>/dev/null || break
-        sleep 1
-    done
-    kill -0 "$OLD_PID" 2>/dev/null && { echo "10秒还没退出，强制kill -9"; kill -9 "$OLD_PID"; sleep 1; }
-else
-    echo "没找到运行中的进程，先检查路径/进程名是否正确，不要往下走"
-fi
-
-ps aux | grep "[对应的grep过滤模式]"
+# 直接对二进制文件本身操作，不需要知道PID、不需要担心cmdline/cwd匹配问题
+fuser -k -9 <二进制路径>
+sleep 2
+fuser <二进制路径> 2>&1 || echo "确认没人占用了"
 ss -tlnp | grep ":<PORT> " || echo "端口已释放"
 
 cp <二进制路径> <二进制路径>.bak.$(date +%Y%m%d%H%M%S)
 cp <新二进制来源> <二进制路径>
 chmod +x <二进制路径>
+
+# ⚠️ 立刻核对一下二进制真的换成新的了，见下面"哈希验证"一节——
+# 不要等启动完、测完功能才发现二进制根本没换
+sha256sum <二进制路径>
 
 # edge-admin 额外要整体替换 web/ 目录（先备份）：
 #   cp -r web web.bak.$(date +%Y%m%d%H%M%S)
@@ -143,11 +138,47 @@ ss -tlnp | grep ":<PORT> "
 tail -15 <日志文件>
 ```
 
+**如果这台机器没有 `fuser` 命令**（不常见，但有的精简镜像没装），退回按 `/proc/<pid>/cwd` 反查（同一台机器上有多个同名进程、无法靠cmdline区分时必须用这个，不能瞎猜）：
+
+```bash
+find_pid_by_cwd() {
+    local target
+    target=$(readlink -f "$1")
+    for pid in $(pgrep -f "<进程名关键字，比如 dns-edge>"); do
+        if [ "$(readlink -f "/proc/$pid/cwd" 2>/dev/null)" = "$target" ]; then
+            echo "$pid"
+            return
+        fi
+    done
+}
+OLD_PID=$(find_pid_by_cwd "$(pwd)")
+echo "OLD_PID=$OLD_PID"
+if [ -n "$OLD_PID" ]; then
+    kill "$OLD_PID"
+    for i in $(seq 1 10); do kill -0 "$OLD_PID" 2>/dev/null || break; sleep 1; done
+    kill -0 "$OLD_PID" 2>/dev/null && { kill -9 "$OLD_PID"; sleep 1; }
+fi
+```
+
+### 哈希验证：压缩包的sha256 和 解压后二进制的sha256，是两个不同的值，千万别搞混
+
+这个错我自己在贵州实例1那次部署里真的犯过一次，害用户以为升级又失败了，白白多走一轮排查——**`dns-edge-linux-amd64-<commit>.tar.gz` 压缩包本身的sha256**，跟**这个压缩包解压出来那个 `dns-edge` 可执行文件的sha256**，是两个完全独立、毫无关系的值。生成部署命令时必须**分别算出这两个值、分别标注期望值**，不能图省事只算一个就当成两者通用：
+
+```bash
+# 本机打包完，两个值都要留：
+sha256sum dns-edge-linux-amd64-<commit>.tar.gz          # 压缩包本身的哈希——验证"传输有没有损坏"用
+tar -xzf dns-edge-linux-amd64-<commit>.tar.gz -C /tmp/verify
+sha256sum /tmp/verify/dns-edge-linux-amd64-<commit>/dns-edge   # 解压后二进制的哈希——验证"cp换的是不是这个新文件"用
+```
+
+给用户的部署命令里，"验证传输"和"验证升级生效"这两步要分别标清楚期望的是哪个哈希，不要笼统写一句"期望值：xxx"了事。
+
 **dns-edge 三个实例的关键区别**（容易搞混，务必核对）：
-- 实例1二进制在 `bin/dns-edge`，实例2/3在根目录 `dns-edge`（没有bin子目录）——`pgrep -f`/`cp` 路径要对应改
-- `pgrep -f "dns-edge"` 太宽泛会在同一台机器上匹配到三个实例，一定要带工作目录路径关键字（比如 `dns-edge-instance2/dns-edge`）精确匹配，否则 `head -1` 可能杀错实例
+- 实例1二进制在 `bin/dns-edge`，实例2/3在根目录 `dns-edge`（没有bin子目录）——路径要对应改
 - 三个实例的 dns-edge 二进制其实是**同一份**（`tar -xzf dns-edge-linux-amd64-<commit>.tar.gz` 解压一次，取出 `dns-edge` 二进制，三个实例分别cp过去用），不需要为每个实例单独打包
 - **绝对不能**把整个tarball直接解压覆盖到实例目录——tarball里打包的 `Corefile` 是仓库自带的通用开发配置（没有真实的AccessKey/edgeagent凭证），只应该取出二进制文件，实例目录里已有的真实 `Corefile` 原封不动
+- **如果升级过程中出现 `cp: ... Text file busy`**，说明老进程没被正确杀掉——直接 `fuser -k -9 <二进制路径>` 一次到位，不要再去猜PID；顺带确认一下有没有因为之前失败的尝试留下绑定失败的僵尸新进程（`ps aux | grep dns-edge`看有没有多余的、`ps -p <pid> -o etime`看存活时长），一并清理掉
+- 部署完用 `sha256sum` 核实二进制真的换了之后，**不要在部署这台机器本机上用 `dig` 自己的公网IP做功能验证**（尤其是ECS/地理路由相关功能）——同机自连流量大多数情况下走本地环回路由，dns-edge看到的源地址是`127.0.0.1`，不是真实对外IP，会得出"看起来还是不对"的错误结论。必须换一台真正在公网另一端的机器发起查询才能验证到位。
 
 **edge-admin/edge-api 同理**——tarball里的 `configs/*.template.yaml` 都是占位模板，只取二进制（+ edge-admin 的 `web/` 静态资源目录，这个不含凭证可以整体替换），目标机器上已有的真实配置文件不要碰。
 
