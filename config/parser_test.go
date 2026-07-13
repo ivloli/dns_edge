@@ -78,6 +78,50 @@ func TestParse_APIBlock(t *testing.T) {
 	assert.Equal(t, ":8080", cfg.API.Listen)
 }
 
+// ── tls block (DoT) ───────────────────────────────────────────────────────────
+
+func TestParse_TLSBlock(t *testing.T) {
+	src := `dns-edge {
+  tls {
+    listen :853
+  }
+}`
+	cfg := parse(t, src)
+	assert.Equal(t, ":853", cfg.TLS.Listen)
+}
+
+func TestParse_TLSBlock_Absent_LeavesEmpty(t *testing.T) {
+	cfg := parse(t, "dns-edge {\n}\n")
+	assert.Empty(t, cfg.TLS.Listen)
+}
+
+func TestParse_TLSBlock_UnknownKey_Error(t *testing.T) {
+	err := parseErr(t, "dns-edge {\n  tls {\n    bogus foo\n  }\n}\n")
+	require.Error(t, err)
+}
+
+// ── doh block (DNS over HTTPS) ────────────────────────────────────────────────
+
+func TestParse_DoHBlock(t *testing.T) {
+	src := `dns-edge {
+  doh {
+    listen :443
+  }
+}`
+	cfg := parse(t, src)
+	assert.Equal(t, ":443", cfg.DoH.Listen)
+}
+
+func TestParse_DoHBlock_Absent_LeavesEmpty(t *testing.T) {
+	cfg := parse(t, "dns-edge {\n}\n")
+	assert.Empty(t, cfg.DoH.Listen)
+}
+
+func TestParse_DoHBlock_UnknownKey_Error(t *testing.T) {
+	err := parseErr(t, "dns-edge {\n  doh {\n    bogus foo\n  }\n}\n")
+	require.Error(t, err)
+}
+
 // ── postgres block ────────────────────────────────────────────────────────────
 
 func TestParse_PostgresBlock(t *testing.T) {

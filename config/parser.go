@@ -259,6 +259,22 @@ func (p *parser) parseMain(cfg *Config) error {
 				return err
 			}
 
+		case "tls":
+			if err := p.expect("{"); err != nil {
+				return err
+			}
+			if err := p.parseTLS(&cfg.TLS); err != nil {
+				return err
+			}
+
+		case "doh":
+			if err := p.expect("{"); err != nil {
+				return err
+			}
+			if err := p.parseDoH(&cfg.DoH); err != nil {
+				return err
+			}
+
 		default:
 			return fmt.Errorf("line %d: unknown key %q in dns-edge block", key.line, key.text)
 		}
@@ -471,6 +487,54 @@ func (p *parser) parseEdgeAgent(cfg *EdgeAgentConfig) error {
 
 func isTruthy(s string) bool {
 	return s == "true" || s == "1" || s == "yes"
+}
+
+func (p *parser) parseTLS(cfg *TLSConfig) error {
+	for {
+		t, ok := p.peek()
+		if !ok {
+			return fmt.Errorf("unexpected EOF inside tls block")
+		}
+		if t.text == "}" {
+			p.next()
+			return nil
+		}
+		key, _ := p.next()
+		switch key.text {
+		case "listen":
+			v, err := p.nextVal(key)
+			if err != nil {
+				return err
+			}
+			cfg.Listen = v
+		default:
+			return fmt.Errorf("line %d: unknown key %q in tls block", key.line, key.text)
+		}
+	}
+}
+
+func (p *parser) parseDoH(cfg *DoHConfig) error {
+	for {
+		t, ok := p.peek()
+		if !ok {
+			return fmt.Errorf("unexpected EOF inside doh block")
+		}
+		if t.text == "}" {
+			p.next()
+			return nil
+		}
+		key, _ := p.next()
+		switch key.text {
+		case "listen":
+			v, err := p.nextVal(key)
+			if err != nil {
+				return err
+			}
+			cfg.Listen = v
+		default:
+			return fmt.Errorf("line %d: unknown key %q in doh block", key.line, key.text)
+		}
+	}
 }
 
 func (p *parser) parseGeo(cfg *GeoConfig) error {

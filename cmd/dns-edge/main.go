@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -174,6 +176,16 @@ func main() {
 	mux := mdns.NewServeMux()
 	mux.Handle(".", handler)
 
+	// TLS (DoT) / DoH cert stores: always constructed so edgeagent has
+	// somewhere to push cluster-level cert updates to regardless of whether
+	// this node has a local tls{}/doh{} listener configured — an unused
+	// store just sits idle (see internal/dns/certstore.go). Whether a
+	// listener actually gets started is decided below, purely by whether
+	// cfg.TLS.Listen/cfg.DoH.Listen is set (same local-Corefile-only split
+	// as the plain DNS/API ports).
+	tlsCertStore := dnshandler.NewCertStore()
+	dohCertStore := dnshandler.NewCertStore()
+
 	// ── start servers ────────────────────────────────────────────────────────
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -190,6 +202,8 @@ func main() {
 			cfg.EdgeAgent.Secret,
 			zoneStore,
 			log,
+			tlsCertStore,
+			dohCertStore,
 		)
 
 		// geo xdb auto-update, API mode (default/recommended): pull the
@@ -278,6 +292,49 @@ func main() {
 		}()
 	}
 
+	// DoT (DNS over TLS): miekg/dns's Server natively supports Net:"tcp-tls",
+	// so this reuses the exact same mux/Handler as the plain UDP/TCP
+	// listeners above — no separate parsing/resolution code needed. The
+	// certificate itself comes from tlsCertStore (kept current by
+	// edgeagent), not from this Corefile block.
+	var tlsSrv *mdns.Server
+	if cfg.TLS.Listen != "" {
+		tlsSrv = &mdns.Server{
+			Net:       "tcp-tls",
+			Addr:      cfg.TLS.Listen,
+			Handler:   mux,
+			TLSConfig: &tls.Config{GetCertificate: tlsCertStore.GetCertificate},
+		}
+		go func() {
+			log.Info("DNS/TLS (DoT) listening", zap.String("addr", cfg.TLS.Listen))
+			if err := tlsSrv.ListenAndServe(); err != nil {
+				log.Error("TLS (DoT) server stopped", zap.Error(err))
+			}
+		}()
+	}
+
+	// DoH (DNS over HTTPS): a sibling HTTPS server hitting the same
+	// Handler.ServeDoH adapter, which itself calls into the same
+	// transport-agnostic handleQuery the UDP/TCP/DoT paths use.
+	var dohSrv *http.Server
+	if cfg.DoH.Listen != "" {
+		dohMux := http.NewServeMux()
+		dohMux.HandleFunc("/dns-query", handler.ServeDoH)
+		dohSrv = &http.Server{
+			Addr:      cfg.DoH.Listen,
+			Handler:   dohMux,
+			TLSConfig: &tls.Config{GetCertificate: dohCertStore.GetCertificate},
+		}
+		go func() {
+			log.Info("DoH listening", zap.String("addr", cfg.DoH.Listen))
+			// Cert/key args left empty: TLSConfig.GetCertificate supplies the
+			// certificate, ListenAndServeTLS just needs non-nil TLSConfig.
+			if err := dohSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				log.Error("DoH server stopped", zap.Error(err))
+			}
+		}()
+	}
+
 	log.Info("dns-edge running",
 		zap.String("listen", cfg.Listen),
 		zap.String("api", cfg.API.Listen),
@@ -295,6 +352,12 @@ func main() {
 	_ = udpSrv.ShutdownContext(shutCtx)
 	if tcpSrv != nil {
 		_ = tcpSrv.ShutdownContext(shutCtx)
+	}
+	if tlsSrv != nil {
+		_ = tlsSrv.ShutdownContext(shutCtx)
+	}
+	if dohSrv != nil {
+		_ = dohSrv.Shutdown(shutCtx)
 	}
 	log.Info("dns-edge stopped")
 }

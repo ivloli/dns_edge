@@ -16,6 +16,24 @@ type Config struct {
 	Sync      SyncConfig
 	Geo       GeoConfig
 	EdgeAgent EdgeAgentConfig
+	TLS       TLSConfig
+	DoH       DoHConfig
+}
+
+// TLSConfig holds settings for the DNS over TLS ("tcp-tls") listener.
+// Empty Listen = disabled (no listener started). The listener's TLS
+// certificate is not configured here — it's pushed down from edgeapi
+// (per-NSCluster setting) via edgeagent's FindCurrentNSNodeConfig and held
+// in an in-memory cert store; this block only decides whether/where dns-edge
+// binds a socket for it, same split as the plain "listen"/"api.listen" ports.
+type TLSConfig struct {
+	Listen string // e.g. ":853" (IANA-assigned DNS-over-TLS port); empty = disabled
+}
+
+// DoHConfig holds settings for the DNS over HTTPS listener. Same split as
+// TLSConfig: Listen is local-only, the certificate is centrally managed.
+type DoHConfig struct {
+	Listen string // e.g. ":443"; empty = disabled
 }
 
 // DefaultXDBFilename is the ip2region xdb filename used when a "geo" block

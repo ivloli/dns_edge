@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.gainetics.io/backend-cdn/goedge/edgecommon/pkg/rpc/pb"
 	mdns "github.com/miekg/dns"
+	"gitlab.gainetics.io/backend-cdn/goedge/edgecommon/pkg/rpc/pb"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
@@ -26,6 +26,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 
+	dnshandler "dns-edge/internal/dns"
 	"dns-edge/internal/iface"
 	"dns-edge/internal/nsroute"
 )
@@ -45,6 +46,19 @@ type Agent struct {
 	soaMu     sync.RWMutex
 	soaConfig *nsClusterSOAConfig // cluster-level SOA config, refreshed via FindCurrentNSNodeConfig; nil until first fetch succeeds
 
+	// tlsCertStore/dohCertStore receive the cluster's TLS(DoT)/DoH certs as
+	// refreshNodeConfig fetches them from the same FindCurrentNSNodeConfig
+	// blob the SOA config comes from. Always non-nil (main.go constructs
+	// them unconditionally, see cmd/dns-edge/main.go) — whether a local
+	// listener actually reads from them is a separate, Corefile-only
+	// decision this package doesn't need to know about.
+	tlsCertStore *dnshandler.CertStore
+	dohCertStore *dnshandler.CertStore
+	tlsMu        sync.Mutex
+	lastTLS      nsClusterCertConfig // last-applied config, to skip redundant CertStore.Set calls
+	dohMu        sync.Mutex
+	lastDoH      nsClusterCertConfig
+
 	// onIP2RegionChanged, if set via SetIP2RegionChangedHandler, is invoked
 	// (in its own goroutine) whenever an nsIP2RegionChanged task arrives —
 	// edgeapi broadcasts this after its optional GitHub auto-sync job
@@ -61,14 +75,19 @@ func (a *Agent) SetIP2RegionChangedHandler(fn func()) {
 }
 
 // New creates an Agent. endpoint is the edgeapi gRPC address (e.g. "127.0.0.1:8031").
-// uniqueID and secret come from the NSNode row in edgeapi's DB.
-func New(endpoint, uniqueID, secret string, store iface.ZoneStore, log *zap.Logger) *Agent {
+// uniqueID and secret come from the NSNode row in edgeapi's DB. tlsCertStore/
+// dohCertStore receive cert updates as the cluster's TLS/DoH settings change;
+// pass freshly-constructed (possibly otherwise-unused) stores even if this
+// node has no local tls{}/doh{} listener configured.
+func New(endpoint, uniqueID, secret string, store iface.ZoneStore, log *zap.Logger, tlsCertStore, dohCertStore *dnshandler.CertStore) *Agent {
 	return &Agent{
-		store:    store,
-		log:      log,
-		uniqueID: uniqueID,
-		secret:   secret,
-		endpoint: endpoint,
+		store:        store,
+		log:          log,
+		uniqueID:     uniqueID,
+		secret:       secret,
+		endpoint:     endpoint,
+		tlsCertStore: tlsCertStore,
+		dohCertStore: dohCertStore,
 	}
 }
 
@@ -120,12 +139,15 @@ func (a *Agent) Run(ctx context.Context) {
 	if err := a.syncRecords(ctx, recordClient, &recordVersion); err != nil {
 		a.log.Warn("edgeagent: initial record sync failed", zap.Error(err))
 	}
-	// Fetch the cluster's SOA config before the initial domain sync's zones
-	// would otherwise be created with a nil SOA (falling back to
+	// Fetch the cluster's SOA/TLS/DoH config before the initial domain sync's
+	// zones would otherwise be created with a nil SOA (falling back to
 	// dns/handler.go's synthesized default) — order matters here since
-	// syncDomains above already ran once; refreshSOA backfills any zone it
-	// just created via SetSOA.
-	a.refreshSOA(ctx, nsNodeClient)
+	// syncDomains above already ran once; refreshNodeConfig backfills any
+	// zone it just created via SetSOA, and gets the TLS/DoH cert stores
+	// populated before any DoT/DoH listener receives its first connection.
+	if err := a.refreshNodeConfig(ctx, nsNodeClient); err != nil {
+		a.log.Warn("edgeagent: initial node config fetch failed", zap.Error(err))
+	}
 
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -256,12 +278,27 @@ func (a *Agent) buildSOA(apex string) *mdns.SOA {
 	}
 }
 
-// refreshSOA fetches the node's cluster SOA config via FindCurrentNSNodeConfig
-// and, if it changed since the last fetch, re-applies it to every zone
-// currently in the store. Errors are logged and swallowed — a stale/default
-// SOA is not worth failing the whole poll tick over, and dns/handler.go's
-// syntheticSOA already covers the "never successfully fetched" case.
-func (a *Agent) refreshSOA(ctx context.Context, client pb.NSNodeServiceClient) error {
+// nsClusterCertConfig mirrors edgeapi's composeNSClusterCertPayload output —
+// the {isOn, certPEM, keyPEM} shape both the "tls" and "doh" keys in
+// FindCurrentNSNodeConfig's JSON blob share. A zero value (IsOn:false) means
+// "not configured/disabled", matching CertStore.Set's fail-closed behavior.
+// All fields are plain strings/bool so the struct is directly comparable
+// with == (used to skip redundant CertStore.Set calls when nothing changed).
+type nsClusterCertConfig struct {
+	IsOn    bool   `json:"isOn"`
+	CertPEM string `json:"certPEM"`
+	KeyPEM  string `json:"keyPEM"`
+}
+
+// refreshNodeConfig fetches the node's cluster-level config (SOA + TLS/DoH
+// certs) via a single FindCurrentNSNodeConfig call and applies whichever
+// parts changed since the last fetch. This is the sole consumer of that RPC;
+// SOA/TLS/DoH are three independent sub-keys in the same JSON blob rather
+// than three separate calls, since they're all "cluster settings this node
+// needs to react to" and edgeapi already composes them together.
+// Errors are logged and swallowed by the caller — a stale/default config is
+// not worth failing the whole poll tick over.
+func (a *Agent) refreshNodeConfig(ctx context.Context, client pb.NSNodeServiceClient) error {
 	resp, err := client.FindCurrentNSNodeConfig(ctx, &pb.FindCurrentNSNodeConfigRequest{})
 	if err != nil {
 		return fmt.Errorf("FindCurrentNSNodeConfig: %w", err)
@@ -271,25 +308,57 @@ func (a *Agent) refreshSOA(ctx context.Context, client pb.NSNodeServiceClient) e
 	}
 
 	var payload struct {
-		SOA *nsClusterSOAConfig `json:"soa"`
+		SOA *nsClusterSOAConfig  `json:"soa"`
+		TLS *nsClusterCertConfig `json:"tls"`
+		DoH *nsClusterCertConfig `json:"doh"`
 	}
 	if err := json.Unmarshal(resp.NsNodeJSON, &payload); err != nil {
 		return fmt.Errorf("decode node config: %w", err)
 	}
-	if payload.SOA == nil {
-		return nil
+
+	if payload.SOA != nil {
+		a.soaMu.Lock()
+		unchanged := a.soaConfig != nil && *a.soaConfig == *payload.SOA
+		a.soaConfig = payload.SOA
+		a.soaMu.Unlock()
+		if !unchanged {
+			for apex := range a.store.Snapshot() {
+				_ = a.store.SetSOA(apex, a.buildSOA(apex))
+			}
+		}
 	}
 
-	a.soaMu.Lock()
-	unchanged := a.soaConfig != nil && *a.soaConfig == *payload.SOA
-	a.soaConfig = payload.SOA
-	a.soaMu.Unlock()
+	if err := a.applyCertConfig(payload.TLS, a.tlsCertStore, &a.tlsMu, &a.lastTLS, "tls"); err != nil {
+		return err
+	}
+	if err := a.applyCertConfig(payload.DoH, a.dohCertStore, &a.dohMu, &a.lastDoH, "doh"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// applyCertConfig pushes cfg (a "tls" or "doh" sub-key from the node config
+// blob; nil means "key absent from response") into store, skipping the
+// CertStore.Set call entirely when it's identical to the last-applied value
+// (store.Set itself is cheap, but this avoids re-parsing the PEM on every
+// 10s poll tick when nothing changed, which is the overwhelmingly common
+// case). A nil/zero-value cfg is treated as "disabled", same as an explicit
+// {isOn:false} — both make the CertStore fail closed.
+func (a *Agent) applyCertConfig(cfg *nsClusterCertConfig, store *dnshandler.CertStore, mu *sync.Mutex, last *nsClusterCertConfig, label string) error {
+	if cfg == nil {
+		cfg = &nsClusterCertConfig{}
+	}
+
+	mu.Lock()
+	unchanged := *last == *cfg
+	*last = *cfg
+	mu.Unlock()
 	if unchanged {
 		return nil
 	}
 
-	for apex := range a.store.Snapshot() {
-		_ = a.store.SetSOA(apex, a.buildSOA(apex))
+	if err := store.Set([]byte(cfg.CertPEM), []byte(cfg.KeyPEM), cfg.IsOn); err != nil {
+		return fmt.Errorf("apply %s cert: %w", label, err)
 	}
 	return nil
 }
@@ -313,11 +382,10 @@ func (a *Agent) poll(
 		switch task.Type {
 		case "nsConfigChanged":
 			// Covers both the node's own config and its cluster's — includes
-			// SOA/Hosts settings saved in EdgeAdmin's "集群设置" page
+			// Hosts/SOA/TLS/DoH settings saved in EdgeAdmin's "集群设置" page
 			// (NSClusterDAO.NotifyUpdate broadcasts this same task type to
-			// the whole cluster). Re-fetch and apply the SOA config; no other
-			// per-node config currently needs reacting to here.
-			taskErr = a.refreshSOA(ctx, nsNodeClient)
+			// the whole cluster). Re-fetch and apply all of them.
+			taskErr = a.refreshNodeConfig(ctx, nsNodeClient)
 		case "nsDomainChanged":
 			taskErr = a.syncDomains(ctx, domainClient, domainVersion)
 		case "nsRecordChanged":
