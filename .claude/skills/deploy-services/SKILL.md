@@ -1,0 +1,160 @@
+---
+name: deploy-services
+description: 打包 edgeapi/edgeadmin/dns-edge 并生成贵州+新加坡测试环境的部署命令。触发词："打包部署"、"生成部署命令"、"打包测试环境"、"部署到测试环境"、"重新部署"。用户明确要求打包/生成部署命令时使用，不要在只是问"怎么部署"这种纯咨询场景下主动触发。
+user-invocable: true
+allowed-tools: "Bash Read Write"
+---
+
+# 打包 + 生成部署命令
+
+这个 skill 把"打包 edgeapi/edgeadmin/dns-edge 三个服务，然后生成贵州/新加坡测试环境部署命令"这套本项目反复要做的流程固化下来，不用每次从头想。
+
+## 背景知识（本项目固定拓扑，除非用户说变了否则直接用）
+
+**四个仓库**：
+- `dns_dev`（本仓库）——dns-edge，公共GitHub仓库，我可以直接push
+- `/home/ivloli/Git_repo/edgeapi`——私有GitLab仓库
+- `/home/ivloli/Git_repo/edgeadmin`——私有GitLab仓库
+- `/home/ivloli/Git_repo/edgecommon`——私有GitLab仓库，共享proto/model，通常改动edgeapi/edgeadmin时如果没碰proto就不需要动它
+
+**分支约定**：三个仓库（edgeapi/edgeadmin/dns_dev）统一用 `feature/ns-dns-edge`，edgeapi/edgeadmin 还要保持一份跟它完全同步的 `test` 分支（详见下方"git commit/push"一节）。
+
+**测试环境拓扑**（部署命令要覆盖的目标）：
+
+| 服务 | 机器 | 路径 | 端口 | 二进制位置 |
+|------|------|------|------|-----------|
+| edgeapi | 新加坡（Singapore） | 视实际情况，找 `bin/edge-api` 或根目录 | gRPC `:8031`（对外可能是`:8001`，问用户或看`ss` 结果确认） | 通常 `bin/edge-api` |
+| edge-admin | 贵州 | `/data/go-edge/edge-admin` | HTTP `:7788` | `bin/edge-admin` + `web/` 目录整体替换 |
+| dns-edge 实例1 | 贵州 | `/data/go-edge/dns-edge` | DNS `:5300`，API `:8080` | `bin/dns-edge`（在bin/子目录下，跟实例2/3不同） |
+| dns-edge 实例2 | 贵州（同一台，跟实例1同机） | `/data/go-edge/dns-edge-instance2` | DNS `:5301`，API `:8081` | `dns-edge`（直接在根目录，没有bin/子目录） |
+| dns-edge 实例3 | 贵州（同一台） | `/data/go-edge/dns-edge-instance3` | DNS `:5302`，API `:8082` | `dns-edge`（根目录） |
+
+**edgenode 通常不需要打包**——除非这次改动明确碰了CDN边缘节点代码（跟NS/DoT/DoH/SOA这类改动通常无关）。
+
+## 执行步骤
+
+### 1. 确认改动范围和分支状态
+
+先检查这三个仓库改了什么、在哪个分支：
+```bash
+for repo in dns_dev "Git_repo/edgeapi" "Git_repo/edgeadmin"; do
+  echo "=== $repo ==="
+  git -C "/home/ivloli/$repo" branch --show-current
+  git -C "/home/ivloli/$repo" log --oneline -3
+  git -C "/home/ivloli/$repo" status --short
+done
+```
+
+如果这次改动**只碰了dns-edge**（比如纯dns-edge侧的bug修复），只打包dns-edge一个服务，不要无脑打包全部三个——问清楚或者根据 `git log`/`git diff` 判断改动范围。
+
+### 2. git commit（如果还没commit）
+
+用户明确要求commit时才做，遵循仓库已有的commit message风格（`feat(ns): ...`/`fix(...): ...`）。**只 `git add` 明确改过的文件**，不要 `git add -A`——这三个仓库（尤其edgeadmin）工作区里经常有不属于这次改动的既有未追踪文件/目录（比如 `web/public/public`、`web/views.bak/`、`web/views/views` 这几个已知的构建产物/备份目录，`dns_dev` 里的 `task_plan.md`/`progress.md`/`findings.md`/`deploy/` 等规划文档），扫进commit容易把不相关的东西也提交了。
+
+### 3. git push——feature 分支 + test 分支都要
+
+**dns_dev**：远程是公共GitHub仓库（`upstream`），可以直接push：
+```bash
+cd /home/ivloli/dns_dev && git push upstream feature/ns-dns-edge
+```
+
+**edgeapi/edgeadmin**：远程是私有GitLab仓库。这两个仓库的 `feature/ns-dns-edge` 和 `test` 分支要保持完全同步：
+```bash
+for repo in edgeapi edgeadmin; do
+  dir="/home/ivloli/Git_repo/$repo"
+  git -C "$dir" checkout test
+  git -C "$dir" merge --ff-only feature/ns-dns-edge   # 通常能直接fast-forward；如果不能说明test分支有额外提交，先跟用户确认怎么处理，不要强推
+  git -C "$dir" checkout feature/ns-dns-edge
+done
+```
+然后各自 `git push origin feature/ns-dns-edge` 和 `git push origin test`。
+
+**已知的坑**：这两个私有仓库的push经常被自动安全分类器误判成"目标是公共仓库"而拦截（哪怕 `git remote -v` 明确显示是私有GitLab）。**遇到这个不要反复重试push本身**——把准确的commit hash和push命令列出来，请用户自己在真实终端执行，之后用 `git fetch origin <branch>` + 比对 `git rev-parse <branch>` / `git rev-parse origin/<branch>` 这类只读操作帮用户核实是否真的推送成功（只读操作不会被同一个分类器拦）。
+
+### 4. 打包
+
+```bash
+cd /home/ivloli/Git_repo/edgeapi && make package
+cd /home/ivloli/Git_repo/edgeadmin && make package
+cd /home/ivloli/dns_dev && make release-package
+```
+
+产物：
+- `edgeapi/edge-api-test-env.tar.gz`
+- `edgeadmin/edge-admin-test-env.tar.gz`
+- `dns_dev/dns-edge-linux-amd64-<commit短hash>.tar.gz`
+
+**注意**：`make package`/`make release-package` 会把 `build/edge-api`/`build/edge-admin`/`bin/dns-edge` 这几个路径**原地重新编译**——如果本机同时有用同一路径跑着的本地开发/联调进程，重新编译不会打断它（Go编译产物是原子rename替换，运行中进程持有旧inode继续跑），但如果内容跟运行中的不一样，进程本身不会自动重启用新代码，这是正常的，不用特意处理。
+
+把三个产物收集到一个时间戳目录方便交付：
+```bash
+RELDIR=/home/ivloli/dns_dev/release-artifacts/$(date +%Y%m%d-%H%M%S)
+install -d -m 755 "$RELDIR"
+cp /home/ivloli/dns_dev/dns-edge-linux-amd64-*.tar.gz "$RELDIR/"
+cp /home/ivloli/Git_repo/edgeapi/edge-api-test-env.tar.gz "$RELDIR/"
+cp /home/ivloli/Git_repo/edgeadmin/edge-admin-test-env.tar.gz "$RELDIR/"
+sha256sum "$RELDIR"/*.tar.gz
+```
+
+### 5. 部署前检查清单（每次都要过一遍，不能跳）
+
+1. **MySQL 表结构要不要改**——对照这次改动是否新增/修改了数据库列（查 `sql.json` 的git diff，或者看有没有新的 `Update*`/`Find*` DAO方法读写了新列）。如果需要，给出精确的 `ALTER TABLE` 语句，并提醒：`teaconst.Version` 没跟着涨的话 `autoUpgrade()` 不会自动迁移，线上库需要手动执行。
+2. **已知遗留问题要不要一起提**——比如 `edgeIPLibraryArtifacts.filename` 缺默认值这个坑（`ALTER TABLE edgeIPLibraryArtifacts MODIFY COLUMN filename varchar(255) NOT NULL DEFAULT '';`），如果目标库还没修过，部署edgeapi前提醒用户先跑。
+3. **新功能是不是默认关闭、需要额外去EdgeAdmin界面开启**——很多这类功能（SOA、Hosts、TLS、DoH）升级完二进制不会自动生效，要提醒用户去对应设置页面配置。
+
+### 6. 生成部署命令
+
+**核心原则：进程管理一律用 `pgrep -f`，不要用 `ss -tlnp | grep pid=` 解析PID**——后者在实际部署环境里出现过解析失败导致 `kill` 拿到空字符串、老进程没死、`cp` 覆盖正在运行的二进制报 `Text file busy`、新进程因为检测到老进程的本地锁而立刻退出，整个升级静默失败但看起来像是成功了。
+
+每个服务的标准升级模式（把 `<PATTERN>`/`<PORT>`/`<BINARY>` 换成具体值）：
+
+```bash
+cd <服务目录>
+
+OLD_PID=$(pgrep -f "<足够精确的命令行匹配串，比如 bin/edge-api 或 dns-edge-instance2/dns-edge>" | head -1)
+echo "OLD_PID=$OLD_PID"
+
+if [ -n "$OLD_PID" ]; then
+    kill "$OLD_PID"
+    for i in $(seq 1 10); do
+        kill -0 "$OLD_PID" 2>/dev/null || break
+        sleep 1
+    done
+    kill -0 "$OLD_PID" 2>/dev/null && { echo "10秒还没退出，强制kill -9"; kill -9 "$OLD_PID"; sleep 1; }
+else
+    echo "没找到运行中的进程，先检查路径/进程名是否正确，不要往下走"
+fi
+
+ps aux | grep "[对应的grep过滤模式]"
+ss -tlnp | grep ":<PORT> " || echo "端口已释放"
+
+cp <二进制路径> <二进制路径>.bak.$(date +%Y%m%d%H%M%S)
+cp <新二进制来源> <二进制路径>
+chmod +x <二进制路径>
+
+# edge-admin 额外要整体替换 web/ 目录（先备份）：
+#   cp -r web web.bak.$(date +%Y%m%d%H%M%S)
+#   rm -rf web && cp -r <新web目录> web
+
+nohup <启动命令> >> <日志文件> 2>&1 &
+sleep 2  # dns-edge建议sleep 3
+ps aux | grep "[对应的grep过滤模式]"
+ss -tlnp | grep ":<PORT> "
+tail -15 <日志文件>
+```
+
+**dns-edge 三个实例的关键区别**（容易搞混，务必核对）：
+- 实例1二进制在 `bin/dns-edge`，实例2/3在根目录 `dns-edge`（没有bin子目录）——`pgrep -f`/`cp` 路径要对应改
+- `pgrep -f "dns-edge"` 太宽泛会在同一台机器上匹配到三个实例，一定要带工作目录路径关键字（比如 `dns-edge-instance2/dns-edge`）精确匹配，否则 `head -1` 可能杀错实例
+- 三个实例的 dns-edge 二进制其实是**同一份**（`tar -xzf dns-edge-linux-amd64-<commit>.tar.gz` 解压一次，取出 `dns-edge` 二进制，三个实例分别cp过去用），不需要为每个实例单独打包
+- **绝对不能**把整个tarball直接解压覆盖到实例目录——tarball里打包的 `Corefile` 是仓库自带的通用开发配置（没有真实的AccessKey/edgeagent凭证），只应该取出二进制文件，实例目录里已有的真实 `Corefile` 原封不动
+
+**edge-admin/edge-api 同理**——tarball里的 `configs/*.template.yaml` 都是占位模板，只取二进制（+ edge-admin 的 `web/` 静态资源目录，这个不含凭证可以整体替换），目标机器上已有的真实配置文件不要碰。
+
+按上表列出的拓扑，依次生成：新加坡机器 edgeapi 一段 → 贵州机器（dns-edge解压一次 + edge-admin一段 + 三个dns-edge实例各一段）。
+
+## 已知不在本skill范围内的事
+
+- 不负责往 `test` 分支之外的其他分支同步
+- 不负责实际SSH到目标机器执行——命令生成出来交给用户自己在真实终端跑
+- 不负责判断"这次改动到底需不需要打包"——如果用户只是问一般性问题、没有明确要求打包部署，不要主动触发这个skill
