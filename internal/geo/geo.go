@@ -1,7 +1,8 @@
 // Package geo wraps the ip2region xdb searcher and provides geo-routing
 // tag matching for DNS record selection.
 //
-// A GeoInfo is parsed from ip2region's "国家|区域|省份|城市|ISP" result
+// A GeoInfo is parsed from ip2region's pipe-separated result (either
+// "国家|省份|城市|ISP" or "国家|省份|城市|ISP|国家代码", see parseRegion)
 // and matched against a record's RouteTags string
 // (format: "country=中国;province=上海;isp=电信").
 //
@@ -129,8 +130,23 @@ func loadSearcher(path string) (*xdb.Searcher, error) {
 
 // parseRegion parses ip2region's pipe-separated result.
 // Handles two known xdb data versions:
-//   - 4 fields: "国家|省份|城市|ISP"         (our current xdb)
-//   - 5 fields: "国家|0|省份|城市|ISP" or "国家|省份|城市|中国电信|CN"
+//   - 4 fields: "国家|省份|城市|ISP"
+//   - 5 fields: "国家|省份|城市|ISP|国家代码" — the trailing field is a
+//     constant two-letter country code (observed as literal "CN"), not part
+//     of the ISP name. This layout is the same whether or not the province
+//     is known: an unknown province still shows up as "0" at parts[1], with
+//     ISP staying at parts[3] and "CN" staying at parts[4].
+//
+// A previous version of this function special-cased parts[1]=="0" (unknown
+// province) and read ISP from parts[4] instead of parts[3] in that case —
+// that was wrong: parts[4] in that situation is the literal country-code
+// suffix, not an ISP name. Confirmed against this project's production xdb:
+// "中国|0|0|移动|CN" for an IP with unknown province — parts[3]="移动" is the
+// real ISP, parts[4]="CN" is not. That bug made isp-only route matching
+// (province unknown, ISP known) silently return ISP="CN" for every such IP,
+// which never matches any real "isp:电信"/"isp:移动"/"isp:联通" route tag —
+// those queries fell through to the no-match "all candidates" tier and
+// looked randomly routed, even with a correct, explicit ECS subnet.
 func parseRegion(raw string) GeoInfo {
 	parts := strings.Split(raw, "|")
 	var province, isp string
@@ -140,15 +156,11 @@ func parseRegion(raw string) GeoInfo {
 		province = normalizeProvince(strings.TrimSpace(parts[1]))
 		isp = normalizeISP(strings.TrimSpace(parts[3]))
 	case 5:
-		if strings.TrimSpace(parts[1]) == "0" {
-			// "中国|0|广东省|广州市|电信"
-			province = normalizeProvince(strings.TrimSpace(parts[2]))
-			isp = normalizeISP(strings.TrimSpace(parts[4]))
-		} else {
-			// "中国|广东省|广州市|中国电信|CN"
-			province = normalizeProvince(strings.TrimSpace(parts[1]))
-			isp = normalizeISP(strings.TrimSpace(parts[3]))
-		}
+		// "中国|广东省|广州市|中国电信|CN" or "中国|0|0|移动|CN" — ISP is
+		// always parts[3]; parts[4] is always the trailing country code,
+		// regardless of whether the province (parts[1]) is known.
+		province = normalizeProvince(strings.TrimSpace(parts[1]))
+		isp = normalizeISP(strings.TrimSpace(parts[3]))
 	default:
 		return GeoInfo{}
 	}
