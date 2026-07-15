@@ -397,6 +397,20 @@ func (h *Handler) pick(records []*iface.Record, fqdn string, qtype uint16, clien
 	return candidates[len(candidates)-1]
 }
 
+// geoIPEntry groups the records that share a destination IP (r.Value) while
+// filterByGeo decides which specificity tier that IP belongs to. Keeping the
+// group together (rather than working with flat []*iface.Record) is also
+// what lets highestPriorityRecords narrow a tier by RoutePriority after the
+// tier itself has been picked.
+type geoIPEntry struct {
+	recs          []*iface.Record
+	priority      int32 // max RoutePriority across recs
+	matchProvince bool
+	matchISP      bool
+	matchCountry  bool
+	isDefault     bool
+}
+
 // filterByGeo narrows records to those best matching the client's geo.
 //
 // Records are grouped by destination IP (r.Value) before tier assignment.
@@ -411,6 +425,10 @@ func (h *Handler) pick(records []*iface.Record, fqdn string, qtype uint16, clien
 //  4. IPs whose records match the client's country only
 //  5. IPs with empty RouteTags (default route)
 //  6. All records (last resort)
+//
+// Within whichever tier wins, highestPriorityRecords further narrows to the
+// IPs whose bound NSRoute carries the highest RoutePriority — see its doc
+// comment for why this only breaks ties and never overrides tier order.
 func (h *Handler) filterByGeo(records []*iface.Record, clientIP net.IP) []*iface.Record {
 	if h.geo == nil || clientIP == nil {
 		return records
@@ -418,25 +436,20 @@ func (h *Handler) filterByGeo(records []*iface.Record, clientIP net.IP) []*iface
 
 	info := h.geo.Lookup(clientIP)
 
-	type ipEntry struct {
-		recs          []*iface.Record
-		matchProvince bool
-		matchISP      bool
-		matchCountry  bool
-		isDefault     bool
-	}
-
-	index := make(map[string]*ipEntry, len(records))
+	index := make(map[string]*geoIPEntry, len(records))
 	order := make([]string, 0, len(records))
 
 	for _, r := range records {
 		e := index[r.Value]
 		if e == nil {
-			e = &ipEntry{}
+			e = &geoIPEntry{}
 			index[r.Value] = e
 			order = append(order, r.Value)
 		}
 		e.recs = append(e.recs, r)
+		if r.RoutePriority > e.priority {
+			e.priority = r.RoutePriority
+		}
 
 		if r.RouteTags == "" {
 			e.isDefault = true
@@ -453,29 +466,57 @@ func (h *Handler) filterByGeo(records []*iface.Record, clientIP net.IP) []*iface
 		}
 	}
 
-	var provinceISP, province, isp, country, defaults []*iface.Record
+	var provinceISP, province, isp, country, defaults []*geoIPEntry
 	for _, ip := range order {
 		e := index[ip]
 		switch {
 		case e.matchProvince && e.matchISP:
-			provinceISP = append(provinceISP, e.recs...)
+			provinceISP = append(provinceISP, e)
 		case e.matchProvince:
-			province = append(province, e.recs...)
+			province = append(province, e)
 		case e.matchISP:
-			isp = append(isp, e.recs...)
+			isp = append(isp, e)
 		case e.matchCountry:
-			country = append(country, e.recs...)
+			country = append(country, e)
 		case e.isDefault:
-			defaults = append(defaults, e.recs...)
+			defaults = append(defaults, e)
 		}
 	}
 
-	for _, tier := range [][]*iface.Record{provinceISP, province, isp, country, defaults} {
+	for _, tier := range [][]*geoIPEntry{provinceISP, province, isp, country, defaults} {
 		if len(tier) > 0 {
-			return tier
+			return highestPriorityRecords(tier)
 		}
 	}
 	return records
+}
+
+// highestPriorityRecords narrows entries to those sharing the highest
+// RoutePriority within a single geo tier, then flattens their records.
+//
+// This only breaks ties between distinct NSRoutes that happen to land in the
+// same specificity tier (e.g. two separate "isp:电信" routes bound to
+// different records) — it never overrides tier specificity itself (an
+// isp-tier match still beats a country-tier match regardless of priority,
+// because this runs after the tier is already chosen). Entries that tie on
+// priority — including the common case where nobody set one, so every entry
+// is 0 — all pass through unchanged, so pick()'s existing Weight-based
+// random selection still load-balances across intentionally-equal routes;
+// priority only ever shrinks the candidate set, it doesn't replace weighting.
+func highestPriorityRecords(entries []*geoIPEntry) []*iface.Record {
+	var maxPriority int32
+	for _, e := range entries {
+		if e.priority > maxPriority {
+			maxPriority = e.priority
+		}
+	}
+	var out []*iface.Record
+	for _, e := range entries {
+		if e.priority == maxPriority {
+			out = append(out, e.recs...)
+		}
+	}
+	return out
 }
 
 // containsTag reports whether routeTags contains key=val as one of its

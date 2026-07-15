@@ -382,6 +382,101 @@ func TestGeoRouting_SpecificRouteSelected(t *testing.T) {
 	}
 }
 
+func TestGeoRouting_PriorityBreaksTierTie(t *testing.T) {
+	// Two records both land in the same "isp" tier (same isp=电信 tag,
+	// different target IPs) — without priority this would be a 50/50
+	// weighted-random pick. recHigh's route carries a higher RoutePriority,
+	// so it alone should win every time.
+	recLow := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
+	recLow.RouteTags = "isp=电信"
+	recLow.RoutePriority = 0
+
+	recHigh := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
+	recHigh.RouteTags = "isp=电信"
+	recHigh.RoutePriority = 5
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recLow, recHigh}
+		},
+	}
+
+	g := &fakeGeo{info: geo.GeoInfo{Country: "中国", Province: "", ISP: "电信"}}
+	h := newGeoHandler(store, g)
+
+	for i := 0; i < 20; i++ {
+		rw := testutil.NewFakeRW()
+		req := makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("1.2.3.4"))
+		h.ServeDNS(rw, req)
+		require.Len(t, rw.LastMsg().Answer, 1)
+		a := rw.LastMsg().Answer[0].(*mdns.A)
+		assert.Equal(t, "2.2.2.2", a.A.String(), "higher RoutePriority record should always win the tie")
+	}
+}
+
+func TestGeoRouting_PriorityNeverOverridesTierSpecificity(t *testing.T) {
+	// recCountry only matches the (less specific) country tier, but carries
+	// a very high priority. recISP matches the (more specific) isp tier with
+	// no priority set at all. isp-tier specificity must still win — priority
+	// only breaks ties *within* a tier, it never promotes a less specific
+	// tier over a more specific one.
+	recCountry := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
+	recCountry.RouteTags = "country=中国"
+	recCountry.RoutePriority = 100
+
+	recISP := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
+	recISP.RouteTags = "isp=电信"
+	recISP.RoutePriority = 0
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recCountry, recISP}
+		},
+	}
+
+	g := &fakeGeo{info: geo.GeoInfo{Country: "中国", Province: "", ISP: "电信"}}
+	h := newGeoHandler(store, g)
+
+	for i := 0; i < 20; i++ {
+		rw := testutil.NewFakeRW()
+		req := makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("1.2.3.4"))
+		h.ServeDNS(rw, req)
+		require.Len(t, rw.LastMsg().Answer, 1)
+		a := rw.LastMsg().Answer[0].(*mdns.A)
+		assert.Equal(t, "2.2.2.2", a.A.String(), "isp-tier match must beat country-tier match regardless of priority")
+	}
+}
+
+func TestGeoRouting_EqualPriorityStillLoadBalances(t *testing.T) {
+	// Two same-tier records with equal (zero) RoutePriority — the existing
+	// weighted-random pick must still see both as candidates, i.e. priority
+	// narrowing must not collapse ties down to a single arbitrary winner.
+	recA := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
+	recA.RouteTags = "isp=电信"
+	recB := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
+	recB.RouteTags = "isp=电信"
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recA, recB}
+		},
+	}
+
+	g := &fakeGeo{info: geo.GeoInfo{Country: "中国", Province: "", ISP: "电信"}}
+	h := newGeoHandler(store, g)
+
+	seen := map[string]bool{}
+	for i := 0; i < 50; i++ {
+		rw := testutil.NewFakeRW()
+		req := makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("1.2.3.4"))
+		h.ServeDNS(rw, req)
+		require.Len(t, rw.LastMsg().Answer, 1)
+		a := rw.LastMsg().Answer[0].(*mdns.A)
+		seen[a.A.String()] = true
+	}
+	assert.Len(t, seen, 2, "both equal-priority records should still be reachable via weighted random")
+}
+
 func TestGeoRouting_FallbackToDefault(t *testing.T) {
 	// Client is from overseas; no country=美国 record exists → fall back to default.
 	recDefault := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)

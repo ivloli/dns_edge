@@ -559,20 +559,25 @@ func (a *Agent) applyRecord(r *pb.NSRecord) error {
 	}
 
 	var routeCodes []string
+	var routePriority int32
 	for _, route := range r.NsRoutes {
 		if route.Code != "" {
 			routeCodes = append(routeCodes, route.Code)
+			if route.Priority > routePriority {
+				routePriority = route.Priority
+			}
 		}
 	}
 
 	rec := &iface.Record{
-		ID:        r.Id,
-		Name:      recFQDN,
-		Type:      qtype,
-		TTL:       uint32(r.Ttl),
-		Value:     r.Value,
-		RR:        rr,
-		RouteTags: nsroute.CodesToTags(routeCodes),
+		ID:            r.Id,
+		Name:          recFQDN,
+		Type:          qtype,
+		TTL:           uint32(r.Ttl),
+		Value:         r.Value,
+		RR:            rr,
+		RouteTags:     nsroute.CodesToTags(routeCodes),
+		RoutePriority: routePriority,
 	}
 	return a.store.PutRecord(targetApex, rec)
 }

@@ -32,7 +32,17 @@ type Record struct {
 	Value     string // text form of rdata, e.g. "1.2.3.4"
 	Weight    int    // static weight; 0 = equal distribution
 	RouteTags string // geo-routing tag, e.g. "country=中国;isp=电信;province=上海"; empty = default route
-	RR        dns.RR // pre-parsed resource record; populated when the record is stored
+
+	// RoutePriority is the highest NSRoute.Priority among the routes bound to
+	// this record (0 if none set one, or if this record isn't NS-mode).
+	// filterByGeo uses it only to break ties between multiple records that
+	// land in the same geo-match tier — it never overrides tier specificity
+	// (an isp-tier match always beats a country-tier match regardless of
+	// priority), and equal-priority records still fall through to the
+	// existing Weight-based random pick, so priority narrows candidates
+	// without disabling load balancing among intentionally-tied routes.
+	RoutePriority int32
+	RR            dns.RR // pre-parsed resource record; populated when the record is stored
 }
 
 // Zone holds every record under a DNS zone apex.
