@@ -165,7 +165,7 @@ func (h *Handler) handleQuery(m *mdns.Msg, r *mdns.Msg, q mdns.Question, clientI
 	// aren't supported. No hosts configured → empty NODATA falls through to
 	// the normal not-found handling below, same as any other missing rrset.
 	if q.Qtype == mdns.TypeNS {
-		if zone := h.store.FindZone(q.Name); zone != nil && zone.Name == q.Name && len(zone.NS) > 0 {
+		if zone := h.store.FindZone(q.Name); zone != nil && strings.EqualFold(zone.Name, q.Name) && len(zone.NS) > 0 {
 			for _, ns := range zone.NS {
 				m.Answer = append(m.Answer, ns)
 			}

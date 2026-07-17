@@ -29,9 +29,22 @@ func New() *RWMutexStore {
 	return &RWMutexStore{zones: make(map[string]*iface.Zone)}
 }
 
+// normalizeName lowercases a DNS name for use as a map key. DNS names are
+// case-insensitive (RFC 1035 §4.1.4, RFC 4343) — real-world resolvers
+// (Google/Cloudflare public DNS included) commonly randomize query-name case
+// ("0x20 encoding") as a spoofing defense, so every zones/Records map key
+// must be compared case-insensitively or those resolvers get REFUSED for
+// every single query. Applied uniformly at both the read and write paths
+// below so it doesn't matter which case the caller (query dispatch vs.
+// admin-entered domain/record names) happens to use.
+func normalizeName(name string) string {
+	return strings.ToLower(name)
+}
+
 // Lookup returns the rrset for (name, qtype), walking up the label hierarchy
 // to find the authoritative zone. Returns nil if not found.
 func (s *RWMutexStore) Lookup(name string, qtype uint16) []*iface.Record {
+	name = normalizeName(name)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -46,6 +59,7 @@ func (s *RWMutexStore) Lookup(name string, qtype uint16) []*iface.Record {
 // safe to dereference after the call returns because PutRecord/DropRecord use
 // copy-on-write semantics. Returns nil when no zone covers name.
 func (s *RWMutexStore) FindZone(name string) *iface.Zone {
+	name = normalizeName(name)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.lockedFindZone(name)
@@ -55,6 +69,7 @@ func (s *RWMutexStore) FindZone(name string) *iface.Zone {
 // Used to distinguish NXDOMAIN (name absent) from NODATA (no records of the
 // requested type).
 func (s *RWMutexStore) NameExists(name string) bool {
+	name = normalizeName(name)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -71,7 +86,8 @@ func (s *RWMutexStore) NameExists(name string) bool {
 }
 
 // lockedFindZone walks up the DNS label hierarchy to find the zone that owns
-// name. Must be called with at least a read lock held.
+// name. Must be called with at least a read lock held. name must already be
+// normalized (callers above all do this).
 func (s *RWMutexStore) lockedFindZone(name string) *iface.Zone {
 	n := name
 	for {
@@ -87,8 +103,13 @@ func (s *RWMutexStore) lockedFindZone(name string) *iface.Zone {
 	return nil
 }
 
-// Update atomically replaces (or inserts) the entire zone.
+// Update atomically replaces (or inserts) the entire zone. zone.Name is
+// normalized in place so the stored value's case matches every other write
+// path (PutRecord/SetSOA/SetNS all construct their Zone with an already-
+// normalized apex) — callers must not assume their original zone.Name
+// survives unchanged.
 func (s *RWMutexStore) Update(zone *iface.Zone) error {
+	zone.Name = normalizeName(zone.Name)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.zones[zone.Name] = zone
@@ -97,6 +118,7 @@ func (s *RWMutexStore) Update(zone *iface.Zone) error {
 
 // Delete removes the zone with the given apex FQDN.
 func (s *RWMutexStore) Delete(apex string) error {
+	apex = normalizeName(apex)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.zones[apex]; !ok {
@@ -125,6 +147,8 @@ func (s *RWMutexStore) Snapshot() map[string]*iface.Zone {
 // replaced; otherwise the record is appended.
 // Creates an empty zone for apex if it does not yet exist.
 func (s *RWMutexStore) PutRecord(apex string, rec *iface.Record) error {
+	apex = normalizeName(apex)
+	recName := normalizeName(rec.Name)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -140,7 +164,7 @@ func (s *RWMutexStore) PutRecord(apex string, rec *iface.Record) error {
 		newRecs[k] = v
 	}
 
-	key := iface.RecordKey{Name: rec.Name, Qtype: rec.Type}
+	key := iface.RecordKey{Name: recName, Qtype: rec.Type}
 	existing := newRecs[key]
 
 	var newSlice []*iface.Record
@@ -176,6 +200,7 @@ func (s *RWMutexStore) PutRecord(apex string, rec *iface.Record) error {
 // next time the zone is created via Update/PutRecord, since agent.go always
 // has the latest cached SOA on hand when it does that.
 func (s *RWMutexStore) SetSOA(apex string, soa *dns.SOA) error {
+	apex = normalizeName(apex)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -194,6 +219,7 @@ func (s *RWMutexStore) SetSOA(apex string, soa *dns.SOA) error {
 // apex has no zone yet; picked up automatically the next time the zone is
 // created, since agent.go always has the latest cached hosts config on hand.
 func (s *RWMutexStore) SetNS(apex string, ns []*dns.NS) error {
+	apex = normalizeName(apex)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -217,6 +243,7 @@ func (s *RWMutexStore) ZoneCount() int {
 // DropRecord removes the record with the given ID from apex's zone using
 // copy-on-write. No-op when the zone or record is absent from the store.
 func (s *RWMutexStore) DropRecord(apex string, id int64) error {
+	apex = normalizeName(apex)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

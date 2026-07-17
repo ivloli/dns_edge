@@ -310,3 +310,41 @@ func TestPutRecord_PreservesNS(t *testing.T) {
 	require.NotNil(t, zone)
 	assert.Equal(t, ns, zone.NS, "PutRecord must not drop the previously-set NS")
 }
+
+// ── Case-insensitivity (RFC 1035 §4.1.4 / RFC 4343) ────────────────────────────
+//
+// Real-world resolvers (Google/Cloudflare public DNS included) commonly
+// randomize query-name case ("0x20 encoding") as a cache-poisoning defense —
+// every one of these must match regardless of what case the store's data was
+// inserted under, or those resolvers get a spurious miss/REFUSED.
+
+func TestPutRecord_LookupCaseInsensitive(t *testing.T) {
+	s := New()
+	require.NoError(t, s.PutRecord("Example.COM.", makeA(t, "WWW.Example.COM.", "1.2.3.4")))
+
+	assert.Len(t, s.Lookup("www.example.com.", mdns.TypeA), 1, "lowercase lookup must find record stored under mixed case")
+	assert.Len(t, s.Lookup("WWW.EXAMPLE.COM.", mdns.TypeA), 1, "uppercase lookup must find record stored under mixed case")
+}
+
+func TestFindZone_CaseInsensitive(t *testing.T) {
+	s := New()
+	seedZone(t, s, "Example.COM.")
+
+	assert.NotNil(t, s.FindZone("example.com."), "lowercase FindZone must locate a zone stored under mixed case")
+	assert.NotNil(t, s.FindZone("EXAMPLE.COM."), "uppercase FindZone must locate a zone stored under mixed case")
+	assert.Equal(t, "example.com.", s.FindZone("EXAMPLE.COM.").Name, "stored zone name is normalized to lowercase")
+}
+
+func TestNameExists_CaseInsensitive(t *testing.T) {
+	s := New()
+	require.NoError(t, s.PutRecord("example.com.", makeA(t, "WWW.example.com.", "1.2.3.4")))
+	assert.True(t, s.NameExists("www.EXAMPLE.com."))
+}
+
+func TestSetSOA_CaseInsensitive(t *testing.T) {
+	s := New()
+	seedZone(t, s, "EXAMPLE.com.")
+	soa := &mdns.SOA{Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeSOA}, Ns: "ns1.example.com."}
+	require.NoError(t, s.SetSOA("example.COM.", soa))
+	assert.Equal(t, soa, s.FindZone("Example.Com.").SOA)
+}

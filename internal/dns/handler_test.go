@@ -366,6 +366,32 @@ func TestServeDNS_NS_EmptyWhenHostsUnconfigured(t *testing.T) {
 	assert.Empty(t, m.Answer)
 }
 
+func TestServeDNS_NS_CaseInsensitiveApexMatch(t *testing.T) {
+	// Real-world resolvers (Google/Cloudflare public DNS included) randomize
+	// query-name case ("0x20 encoding"). The store already normalizes to
+	// lowercase internally, so zone.Name comes back lowercase regardless of
+	// how it was inserted — this must still match a mixed-case query name.
+	zone := &iface.Zone{
+		Name:    "example.com.",
+		Records: map[iface.RecordKey][]*iface.Record{},
+		NS: []*mdns.NS{
+			{Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeNS, Class: mdns.ClassINET, Ttl: 3600}, Ns: "ns1.provider.test."},
+		},
+	}
+	store := &testutil.MockZoneStore{
+		LookupFn:     func(string, uint16) []*iface.Record { return nil },
+		NameExistsFn: func(string) bool { return true },
+		FindZoneFn:   func(string) *iface.Zone { return zone },
+	}
+	rw := testutil.NewFakeRW()
+	newHandler(store, &testutil.MockWeightProvider{}).ServeDNS(rw, makeQuery("ExAmPlE.CoM.", mdns.TypeNS))
+
+	m := rw.LastMsg()
+	require.NotNil(t, m)
+	assert.Equal(t, mdns.RcodeSuccess, m.Rcode)
+	require.Len(t, m.Answer, 1, "mixed-case query must still match the (lowercase-normalized) zone apex")
+}
+
 // ── Probabilistic sync trigger ────────────────────────────────────────────────
 
 func TestServeDNS_ProbSync_Called(t *testing.T) {
