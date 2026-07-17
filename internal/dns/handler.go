@@ -158,6 +158,21 @@ func (h *Handler) handleQuery(m *mdns.Msg, r *mdns.Msg, q mdns.Question, clientI
 		return
 	}
 
+	// Zone apex NS records ("hosts" cluster setting) — these live on
+	// iface.Zone itself (mirrors SOA), not in the per-name Records map, since
+	// they're metadata about the zone as a whole rather than a queryable
+	// rrset like A/CNAME. Only the exact apex answers; delegated subzones
+	// aren't supported. No hosts configured → empty NODATA falls through to
+	// the normal not-found handling below, same as any other missing rrset.
+	if q.Qtype == mdns.TypeNS {
+		if zone := h.store.FindZone(q.Name); zone != nil && zone.Name == q.Name && len(zone.NS) > 0 {
+			for _, ns := range zone.NS {
+				m.Answer = append(m.Answer, ns)
+			}
+			return
+		}
+	}
+
 	// Direct rrset lookup
 	records := h.store.Lookup(q.Name, q.Qtype)
 	if len(records) > 0 {

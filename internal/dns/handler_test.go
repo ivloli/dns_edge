@@ -317,6 +317,55 @@ func TestServeDNS_SyntheticSOA_InAuthority(t *testing.T) {
 	assert.Equal(t, "example.com.", soa.Header().Name)
 }
 
+// ── zone apex NS ("hosts" cluster setting) ────────────────────────────────────
+
+func TestServeDNS_NS_AnsweredFromZone(t *testing.T) {
+	zone := &iface.Zone{
+		Name:    "example.com.",
+		Records: map[iface.RecordKey][]*iface.Record{},
+		NS: []*mdns.NS{
+			{Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeNS, Class: mdns.ClassINET, Ttl: 3600}, Ns: "ns1.provider.test."},
+			{Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeNS, Class: mdns.ClassINET, Ttl: 3600}, Ns: "ns2.provider.test."},
+		},
+	}
+	store := &testutil.MockZoneStore{
+		LookupFn:     func(string, uint16) []*iface.Record { return nil },
+		NameExistsFn: func(string) bool { return true },
+		FindZoneFn:   func(string) *iface.Zone { return zone },
+	}
+	rw := testutil.NewFakeRW()
+	newHandler(store, &testutil.MockWeightProvider{}).ServeDNS(rw, makeQuery("example.com.", mdns.TypeNS))
+
+	m := rw.LastMsg()
+	require.NotNil(t, m)
+	assert.Equal(t, mdns.RcodeSuccess, m.Rcode)
+	require.Len(t, m.Answer, 2)
+	for _, rr := range m.Answer {
+		ns, ok := rr.(*mdns.NS)
+		require.True(t, ok, "answer must be NS record")
+		assert.Equal(t, "example.com.", ns.Header().Name)
+	}
+}
+
+func TestServeDNS_NS_EmptyWhenHostsUnconfigured(t *testing.T) {
+	// No zone.NS at all (never configured "hosts") — must NOT synthesize a
+	// fake nameserver like syntheticSOA does for SOA; a made-up "ns1.<apex>"
+	// would point real resolvers at a hostname with no address record.
+	zone := &iface.Zone{Name: "example.com.", Records: map[iface.RecordKey][]*iface.Record{}}
+	store := &testutil.MockZoneStore{
+		LookupFn:     func(string, uint16) []*iface.Record { return nil },
+		NameExistsFn: func(string) bool { return true },
+		FindZoneFn:   func(string) *iface.Zone { return zone },
+	}
+	rw := testutil.NewFakeRW()
+	newHandler(store, &testutil.MockWeightProvider{}).ServeDNS(rw, makeQuery("example.com.", mdns.TypeNS))
+
+	m := rw.LastMsg()
+	require.NotNil(t, m)
+	assert.Equal(t, mdns.RcodeSuccess, m.Rcode, "NODATA, not an error")
+	assert.Empty(t, m.Answer)
+}
+
 // ── Probabilistic sync trigger ────────────────────────────────────────────────
 
 func TestServeDNS_ProbSync_Called(t *testing.T) {

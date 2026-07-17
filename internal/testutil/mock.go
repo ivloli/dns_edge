@@ -20,6 +20,7 @@ type MockZoneStore struct {
 	LookupFn     func(name string, qtype uint16) []*iface.Record
 	UpdateFn     func(zone *iface.Zone) error
 	SetSOAFn     func(apex string, soa *mdns.SOA) error
+	SetNSFn      func(apex string, ns []*mdns.NS) error
 	DeleteFn     func(apex string) error
 	SnapshotFn   func() map[string]*iface.Zone
 	PutRecordFn  func(apex string, rec *iface.Record) error
@@ -46,6 +47,12 @@ func (m *MockZoneStore) Update(zone *iface.Zone) error {
 func (m *MockZoneStore) SetSOA(apex string, soa *mdns.SOA) error {
 	if m.SetSOAFn != nil {
 		return m.SetSOAFn(apex, soa)
+	}
+	return nil
+}
+func (m *MockZoneStore) SetNS(apex string, ns []*mdns.NS) error {
+	if m.SetNSFn != nil {
+		return m.SetNSFn(apex, ns)
 	}
 	return nil
 }

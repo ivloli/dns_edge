@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,9 @@ type Agent struct {
 
 	soaMu     sync.RWMutex
 	soaConfig *nsClusterSOAConfig // cluster-level SOA config, refreshed via FindCurrentNSNodeConfig; nil until first fetch succeeds
+
+	hostsMu     sync.RWMutex
+	hostsConfig []string // cluster-level NS "hosts" setting, refreshed alongside SOA; nil until first fetch succeeds or if never configured
 
 	// tlsCertStore/dohCertStore receive the cluster's TLS(DoT)/DoH certs as
 	// refreshNodeConfig fetches them from the same FindCurrentNSNodeConfig
@@ -278,6 +282,43 @@ func (a *Agent) buildSOA(apex string) *mdns.SOA {
 	}
 }
 
+// buildNS constructs the zone's NS records from the currently cached cluster
+// "hosts" config. Unlike buildSOA there is no synthetic fallback when hosts
+// is empty: SOA's Ns/Mbox fields are informational (nobody actually queries
+// them as real nameservers), but a zone's NS answer tells real resolvers
+// where to send follow-up queries — inventing "ns1.<apex>" would point
+// customers at a hostname that doesn't exist and has no address record,
+// which is worse than just answering empty. Returns nil (no records) until
+// an admin has actually configured hosts for the cluster.
+func (a *Agent) buildNS(apex string) []*mdns.NS {
+	a.hostsMu.RLock()
+	hosts := a.hostsConfig
+	a.hostsMu.RUnlock()
+
+	if len(hosts) == 0 {
+		return nil
+	}
+
+	a.soaMu.RLock()
+	ttl := uint32(3600)
+	if a.soaConfig != nil && a.soaConfig.MinTTL > 0 {
+		ttl = a.soaConfig.MinTTL
+	}
+	a.soaMu.RUnlock()
+
+	rrs := make([]*mdns.NS, 0, len(hosts))
+	for _, host := range hosts {
+		if host == "" {
+			continue
+		}
+		rrs = append(rrs, &mdns.NS{
+			Hdr: mdns.RR_Header{Name: apex, Rrtype: mdns.TypeNS, Class: mdns.ClassINET, Ttl: ttl},
+			Ns:  iface.FQDN(host),
+		})
+	}
+	return rrs
+}
+
 // nsClusterCertConfig mirrors edgeapi's composeNSClusterCertPayload output —
 // the {isOn, certPEM, keyPEM} shape both the "tls" and "doh" keys in
 // FindCurrentNSNodeConfig's JSON blob share. A zero value (IsOn:false) means
@@ -308,22 +349,36 @@ func (a *Agent) refreshNodeConfig(ctx context.Context, client pb.NSNodeServiceCl
 	}
 
 	var payload struct {
-		SOA *nsClusterSOAConfig  `json:"soa"`
-		TLS *nsClusterCertConfig `json:"tls"`
-		DoH *nsClusterCertConfig `json:"doh"`
+		SOA   *nsClusterSOAConfig  `json:"soa"`
+		Hosts []string             `json:"hosts"`
+		TLS   *nsClusterCertConfig `json:"tls"`
+		DoH   *nsClusterCertConfig `json:"doh"`
 	}
 	if err := json.Unmarshal(resp.NsNodeJSON, &payload); err != nil {
 		return fmt.Errorf("decode node config: %w", err)
 	}
 
+	soaChanged := payload.SOA != nil
 	if payload.SOA != nil {
 		a.soaMu.Lock()
 		unchanged := a.soaConfig != nil && *a.soaConfig == *payload.SOA
 		a.soaConfig = payload.SOA
 		a.soaMu.Unlock()
-		if !unchanged {
-			for apex := range a.store.Snapshot() {
+		soaChanged = !unchanged
+	}
+
+	a.hostsMu.Lock()
+	hostsChanged := !slices.Equal(a.hostsConfig, payload.Hosts)
+	a.hostsConfig = payload.Hosts
+	a.hostsMu.Unlock()
+
+	if soaChanged || hostsChanged {
+		for apex := range a.store.Snapshot() {
+			if soaChanged {
 				_ = a.store.SetSOA(apex, a.buildSOA(apex))
+			}
+			if hostsChanged {
+				_ = a.store.SetNS(apex, a.buildNS(apex))
 			}
 		}
 	}
@@ -446,6 +501,7 @@ func (a *Agent) syncDomains(ctx context.Context, client pb.NSDomainServiceClient
 						Name:    apex,
 						Records: make(map[iface.RecordKey][]*iface.Record),
 						SOA:     a.buildSOA(apex),
+						NS:      a.buildNS(apex),
 					})
 				}
 			}

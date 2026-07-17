@@ -50,6 +50,14 @@ type Zone struct {
 	Name    string                  // apex FQDN with trailing dot, e.g. "example.com."
 	Records map[RecordKey][]*Record // (owner name, qtype) → records
 	SOA     *dns.SOA                // nil until Phase 2 (PostgreSQL load)
+
+	// NS holds the zone's authoritative nameserver records, sourced from the
+	// NS cluster's "hosts" setting (EdgeAdmin "基础设置"). nil/empty means no
+	// hosts configured — dig <apex> NS then gets an empty NODATA answer
+	// rather than a synthesized/fake nameserver, since unlike SOA's mname
+	// (informational only) a wrong NS answer would send real resolvers to a
+	// hostname that doesn't actually exist.
+	NS []*dns.NS
 }
 
 // RecordKey uniquely identifies a rrset within a zone.
@@ -72,6 +80,10 @@ type ZoneStore interface {
 	// SetSOA updates the SOA record for apex's zone without touching its
 	// Records (copy-on-write, mirrors PutRecord). No-op if apex has no zone.
 	SetSOA(apex string, soa *dns.SOA) error
+
+	// SetNS updates the NS records for apex's zone without touching its
+	// Records/SOA (copy-on-write, mirrors SetSOA). No-op if apex has no zone.
+	SetNS(apex string, ns []*dns.NS) error
 
 	// Delete removes a zone by its apex FQDN.
 	Delete(apex string) error

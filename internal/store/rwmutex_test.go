@@ -235,3 +235,78 @@ func TestDelete_ErrorWhenNotFound(t *testing.T) {
 	err := s.Delete("ghost.com.")
 	assert.Error(t, err)
 }
+
+// ── SetNS ─────────────────────────────────────────────────────────────────────
+
+func TestSetNS_UpdatesZone(t *testing.T) {
+	s := New()
+	seedZone(t, s, "example.com.")
+	ns := []*mdns.NS{{Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeNS}, Ns: "ns1.provider.test."}}
+
+	require.NoError(t, s.SetNS("example.com.", ns))
+
+	zone := s.FindZone("example.com.")
+	require.NotNil(t, zone)
+	assert.Equal(t, ns, zone.NS)
+}
+
+func TestSetNS_NoOp_WhenZoneAbsent(t *testing.T) {
+	s := New()
+	ns := []*mdns.NS{{Hdr: mdns.RR_Header{Name: "ghost.com.", Rrtype: mdns.TypeNS}, Ns: "ns1.provider.test."}}
+	require.NoError(t, s.SetNS("ghost.com.", ns))
+	assert.Nil(t, s.FindZone("ghost.com."))
+}
+
+// TestSetNS_PreservesSOAAndRecords guards against the exact bug class this
+// copy-on-write pattern invites: adding a new Zone field (NS) means every
+// existing constructor that rebuilds a Zone struct literal has to remember to
+// carry it over, or a later write silently drops previously-set data. Here
+// we assert the reverse direction: SetNS must not drop the SOA or Records
+// that PutRecord/SetSOA already established.
+func TestSetNS_PreservesSOAAndRecords(t *testing.T) {
+	s := New()
+	rec := makeA(t, "www.example.com.", "1.2.3.4")
+	seedZone(t, s, "example.com.", rec)
+	soa := &mdns.SOA{Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeSOA}, Ns: "ns1.example.com."}
+	require.NoError(t, s.SetSOA("example.com.", soa))
+
+	ns := []*mdns.NS{{Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeNS}, Ns: "ns1.provider.test."}}
+	require.NoError(t, s.SetNS("example.com.", ns))
+
+	zone := s.FindZone("example.com.")
+	require.NotNil(t, zone)
+	assert.Equal(t, ns, zone.NS)
+	assert.Equal(t, soa, zone.SOA, "SetNS must not drop the previously-set SOA")
+	assert.Len(t, zone.Records[iface.RecordKey{Name: "www.example.com.", Qtype: mdns.TypeA}], 1, "SetNS must not drop existing Records")
+}
+
+// TestSetSOA_PreservesNS is the mirror check: setting SOA after NS was
+// already configured must not wipe the NS records back out.
+func TestSetSOA_PreservesNS(t *testing.T) {
+	s := New()
+	seedZone(t, s, "example.com.")
+	ns := []*mdns.NS{{Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeNS}, Ns: "ns1.provider.test."}}
+	require.NoError(t, s.SetNS("example.com.", ns))
+
+	soa := &mdns.SOA{Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeSOA}, Ns: "ns1.example.com."}
+	require.NoError(t, s.SetSOA("example.com.", soa))
+
+	zone := s.FindZone("example.com.")
+	require.NotNil(t, zone)
+	assert.Equal(t, ns, zone.NS, "SetSOA must not drop the previously-set NS")
+}
+
+// TestPutRecord_PreservesNS mirrors the existing SOA carry-over guarantee:
+// PutRecord's copy-on-write must not drop a zone's NS records either.
+func TestPutRecord_PreservesNS(t *testing.T) {
+	s := New()
+	seedZone(t, s, "example.com.")
+	ns := []*mdns.NS{{Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeNS}, Ns: "ns1.provider.test."}}
+	require.NoError(t, s.SetNS("example.com.", ns))
+
+	require.NoError(t, s.PutRecord("example.com.", makeA(t, "www.example.com.", "1.2.3.4")))
+
+	zone := s.FindZone("example.com.")
+	require.NotNil(t, zone)
+	assert.Equal(t, ns, zone.NS, "PutRecord must not drop the previously-set NS")
+}

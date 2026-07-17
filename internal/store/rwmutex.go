@@ -164,6 +164,7 @@ func (s *RWMutexStore) PutRecord(apex string, rec *iface.Record) error {
 	newZone := &iface.Zone{Name: apex, Records: newRecs}
 	if old != nil {
 		newZone.SOA = old.SOA
+		newZone.NS = old.NS
 	}
 	s.zones[apex] = newZone
 	return nil
@@ -183,7 +184,25 @@ func (s *RWMutexStore) SetSOA(apex string, soa *dns.SOA) error {
 		return nil
 	}
 
-	newZone := &iface.Zone{Name: apex, Records: old.Records, SOA: soa}
+	newZone := &iface.Zone{Name: apex, Records: old.Records, SOA: soa, NS: old.NS}
+	s.zones[apex] = newZone
+	return nil
+}
+
+// SetNS updates the NS records for apex's zone using copy-on-write, without
+// touching its Records/SOA — mirrors SetSOA. No-op (zone stays absent) when
+// apex has no zone yet; picked up automatically the next time the zone is
+// created, since agent.go always has the latest cached hosts config on hand.
+func (s *RWMutexStore) SetNS(apex string, ns []*dns.NS) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	old := s.zones[apex]
+	if old == nil {
+		return nil
+	}
+
+	newZone := &iface.Zone{Name: apex, Records: old.Records, SOA: old.SOA, NS: ns}
 	s.zones[apex] = newZone
 	return nil
 }
