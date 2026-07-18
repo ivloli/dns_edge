@@ -165,6 +165,35 @@ func (s *RWMutexStore) PutRecord(apex string, rec *iface.Record) error {
 	}
 
 	key := iface.RecordKey{Name: recName, Qtype: rec.Type}
+
+	// If rec.ID already exists under a DIFFERENT key, its name and/or type
+	// just changed (e.g. an admin edited a record from NS to A, or renamed
+	// it) — drop the stale entry from its old bucket first. Without this, an
+	// edited record leaves an orphaned duplicate under its old (name, qtype)
+	// forever, since the code below only ever looks for a same-ID match
+	// within the NEW key's bucket. This is the exact bug that let a record
+	// edited from NS to A keep answering both types indefinitely.
+	if rec.ID > 0 {
+		for k, recs := range newRecs {
+			if k == key {
+				continue
+			}
+			for i, r := range recs {
+				if r.ID == rec.ID {
+					if len(recs) == 1 {
+						delete(newRecs, k)
+					} else {
+						trimmed := make([]*iface.Record, 0, len(recs)-1)
+						trimmed = append(trimmed, recs[:i]...)
+						trimmed = append(trimmed, recs[i+1:]...)
+						newRecs[k] = trimmed
+					}
+					break
+				}
+			}
+		}
+	}
+
 	existing := newRecs[key]
 
 	var newSlice []*iface.Record

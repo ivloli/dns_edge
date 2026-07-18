@@ -69,6 +69,47 @@ func TestPutRecord_CreatesZone(t *testing.T) {
 	require.Len(t, got, 1)
 }
 
+// TestPutRecord_EditingTypeRemovesStaleOldTypeEntry reproduces a real bug
+// found live: a record originally created as NS (owner "ns1.timohoo.top",
+// value "111.123.254.177" — an admin fat-fingered the type dropdown) and
+// later corrected to A kept answering BOTH types forever, because
+// PutRecord's replace-by-ID search only ever looked inside the *new* type's
+// bucket. The database had one clean A row; dns-edge's memory still held a
+// phantom NS record with the same ID under the old (name, NS) key.
+func TestPutRecord_EditingTypeRemovesStaleOldTypeEntry(t *testing.T) {
+	s := New()
+	nsRR, err := mdns.NewRR("ns1.timohoo.top. 3600 IN NS 111.123.254.177.")
+	require.NoError(t, err)
+	original := &iface.Record{ID: 21, Name: "ns1.timohoo.top.", Type: mdns.TypeNS, Value: "111.123.254.177", RR: nsRR}
+	require.NoError(t, s.PutRecord("timohoo.top.", original))
+
+	// Admin edits the record's type from NS to A, same ID.
+	edited := makeA(t, "ns1.timohoo.top.", "111.123.254.177")
+	edited.ID = 21
+	require.NoError(t, s.PutRecord("timohoo.top.", edited))
+
+	assert.Empty(t, s.Lookup("ns1.timohoo.top.", mdns.TypeNS), "stale NS bucket must be cleared after the record's type changed to A")
+	got := s.Lookup("ns1.timohoo.top.", mdns.TypeA)
+	require.Len(t, got, 1)
+	assert.Equal(t, "111.123.254.177", got[0].Value)
+}
+
+// TestPutRecord_RenamingRemovesStaleOldNameEntry is the same bug but for a
+// renamed record (same ID, different owner name) instead of a retyped one.
+func TestPutRecord_RenamingRemovesStaleOldNameEntry(t *testing.T) {
+	s := New()
+	r := makeA(t, "old-name.example.com.", "1.2.3.4")
+	r.ID = 99
+	require.NoError(t, s.PutRecord("example.com.", r))
+
+	renamed := makeA(t, "new-name.example.com.", "1.2.3.4")
+	renamed.ID = 99
+	require.NoError(t, s.PutRecord("example.com.", renamed))
+
+	assert.Empty(t, s.Lookup("old-name.example.com.", mdns.TypeA), "stale entry under the old name must be removed after a rename")
+	assert.Len(t, s.Lookup("new-name.example.com.", mdns.TypeA), 1)
+}
+
 func TestPutRecord_COW_OldZoneUnchanged(t *testing.T) {
 	s := New()
 	r1 := makeA(t, "www.example.com.", "1.2.3.4")

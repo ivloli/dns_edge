@@ -50,6 +50,8 @@ type Agent struct {
 	hostsMu     sync.RWMutex
 	hostsConfig []string // cluster-level NS "hosts" setting, refreshed alongside SOA; nil until first fetch succeeds or if never configured
 
+	lastReconcile time.Time // last time reconcileDomains ran; zero until the first periodic tick after startup (the initial sync already covers a cold start)
+
 	// tlsCertStore/dohCertStore receive the cluster's TLS(DoT)/DoH certs as
 	// refreshNodeConfig fetches them from the same FindCurrentNSNodeConfig
 	// blob the SOA config comes from. Always non-nil (main.go constructs
@@ -155,6 +157,7 @@ func (a *Agent) Run(ctx context.Context) {
 
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
+	a.lastReconcile = time.Now() // initial sync above already covers a cold start; don't redo it a few seconds later
 
 	for {
 		select {
@@ -164,6 +167,12 @@ func (a *Agent) Run(ctx context.Context) {
 		case <-ticker.C:
 			a.reportStatus(ctx, nsNodeClient, true)
 			a.poll(ctx, taskClient, nsNodeClient, domainClient, recordClient, &domainVersion, &recordVersion)
+			if time.Since(a.lastReconcile) >= reconcileDomainsInterval {
+				if err := a.reconcileDomains(ctx, domainClient); err != nil {
+					a.log.Warn("edgeagent: reconcileDomains failed", zap.Error(err))
+				}
+				a.lastReconcile = time.Now()
+			}
 		}
 	}
 }
@@ -511,6 +520,65 @@ func (a *Agent) syncDomains(ctx context.Context, client pb.NSDomainServiceClient
 		}
 		if int32(len(resp.NsDomains)) < pageSize {
 			break
+		}
+	}
+	return nil
+}
+
+// reconcileDomainsInterval bounds how often reconcileDomains runs — it's an
+// O(all domains in this node's cluster) full fetch, not an incremental diff,
+// so it runs periodically rather than on every 10s poll tick.
+const reconcileDomainsInterval = 5 * time.Minute
+
+// reconcileDomains deletes any zone the store holds that edgeapi no longer
+// considers this node's cluster's to serve.
+//
+// This is the only way to detect a domain that moved to a different NS
+// cluster: ListNSDomainsAfterVersion (used by syncDomains) filters by this
+// node's clusterId, so once a domain's clusterId changes away from this
+// node's cluster, the row simply stops matching that filter — it isn't
+// returned as "deleted", it just silently stops appearing at all. Without
+// this reconciliation, a moved-away domain's zone (and every record in it)
+// stays in the store forever, since nothing in the incremental sync path
+// ever tells this node to remove it.
+//
+// Fetches the full current set with Version:0 (same paginated call
+// syncDomains's initial run uses), rather than tracking a separate version
+// counter — a stray domain could otherwise persist indefinitely if this
+// node's own last-seen version already exceeds it.
+func (a *Agent) reconcileDomains(ctx context.Context, client pb.NSDomainServiceClient) error {
+	valid := map[string]bool{}
+	const pageSize = 200
+	var version int64
+	for {
+		resp, err := client.ListNSDomainsAfterVersion(ctx, &pb.ListNSDomainsAfterVersionRequest{
+			Version: version,
+			Size:    pageSize,
+		})
+		if err != nil {
+			return fmt.Errorf("ListNSDomainsAfterVersion (reconcile): %w", err)
+		}
+		if len(resp.NsDomains) == 0 {
+			break
+		}
+		for _, d := range resp.NsDomains {
+			if !d.IsDeleted && d.IsOn {
+				valid[iface.FQDN(d.Name)] = true
+			}
+			if d.Version > version {
+				version = d.Version
+			}
+		}
+		if int32(len(resp.NsDomains)) < pageSize {
+			break
+		}
+	}
+
+	for apex := range a.store.Snapshot() {
+		if !valid[apex] {
+			_ = a.store.Delete(apex)
+			a.log.Info("edgeagent: reconcile removed a zone no longer assigned to this node's cluster",
+				zap.String("apex", apex))
 		}
 	}
 	return nil
