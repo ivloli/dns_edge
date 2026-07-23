@@ -70,35 +70,33 @@ GoEdge EdgeAPI（edgeapi，MySQL）
 
 ### 运行
 
-`Corefile` 故意不进 git（machine-local 的机器可能在里面写了真实连接密钥，`.gitignore` 里排除了它）——**全新 clone 下来是没有这个文件的，这是设计如此，不是漏提交**。仓库里跟着的是占位符版本 `Corefile.example`。
+`Corefile` 不进 git（含真实密钥），仓库里是占位符版本 `Corefile.example`；`make release-package` 本地没有 `Corefile` 时会自动改用它。每个字段具体填什么、去系统里哪里查，见下方「配置项（Corefile）」。
 
 ```bash
 # 克隆项目
 git clone <repo-url>
 cd dns-edge
 
-# 全新机器打包/编译：直接用占位符模板即可，`make release-package` 在本地没有
-# Corefile 时会自动 fallback 用 Corefile.example，不需要手动处理这一步。
-# 如果本机确实要启动一个真实可用的实例，再照下面这样写一份真正的 Corefile：
+# 编写 Corefile（也可以直接 cp Corefile.example Corefile 再改）
 cat > Corefile <<'EOF'
 dns-edge {
-    dns {
-        listen :5300
-        tcp    true
-    }
+    listen :53
+    tcp    true
+
     api {
-        listen                    :8080
-        edgedns_access_key_id     <your-key-id>
-        edgedns_access_key_secret <your-key-secret>
-        goedge_secret             <your-goedge-secret>
+        listen :8080
     }
-    nacos {
-        addr       127.0.0.1:8848
-        namespace  default
+
+    # 智能DNS（NS）模式必需，uniqueId/secret 去 EdgeAdmin「智能DNS→集群详情→
+    # 节点管理→添加节点」生成，每个实例一份专属的，不能跟别的实例共用。
+    edgeagent {
+        endpoint  <edgeapi的gRPC地址，如127.0.0.1:8031>
+        unique_id <替换成真实值>
+        secret    <替换成真实值>
     }
+
     geo {
-        # xdb 留空默认相对路径 "ip2region.xdb"，从 edgeapi 自动拉取
-        # （需要 edgeagent 块也配置好）；见下方「地理路由」一节
+        # 留空即可，默认从 edgeapi 自动拉取（见下方「地理路由」一节）
         auto_update     true
         update_interval 24h
     }
@@ -108,8 +106,6 @@ EOF
 # 启动
 ./dns-edge -config Corefile
 ```
-
-`edgedns_access_key_id`/`secret`（CDN 模式）或 `edgeagent.unique_id`/`secret`（NS 模式）不能直接照抄另一个已经在跑的实例——那是它专属的连接身份，两边同时用同一份会互相"挤掉"。要一份真正能用的新凭证，去 EdgeAdmin 对应模块（CDN 模式：「域名解析→DNS 服务商→添加服务商」类型选 `EdgeDNS API`；NS 模式：「智能DNS→集群详情→节点管理→添加节点」）新建一个，拿到全新的一对值填进去。
 
 ### Docker
 
@@ -228,19 +224,29 @@ dns-edge/
 └── README.md
 ```
 
-## 配置项（Corefile）
+## 配置项（Corefile）——每个字段去系统里哪里查
+
+**本地参数**（自己定，系统里没有对应的值可查）：
 
 | 块 | 字段 | 说明 |
 |----|------|------|
-| `dns {}` | `listen` | DNS 监听地址，默认 `:5300` |
-| `dns {}` | `tcp` | 启用 TCP，默认 `true` |
-| `api {}` | `listen` | HTTP API 监听地址，默认 `:8080` |
-| `api {}` | `edgedns_access_key_id` | edgeDNSAPI 鉴权 Key ID |
-| `api {}` | `edgedns_access_key_secret` | edgeDNSAPI 鉴权 Key Secret |
-| `api {}` | `goedge_secret` | customHTTP Provider 共享密钥 |
-| `nacos {}` | `addr` | Nacos 地址（分流权重，可选） |
-| `edgeagent {}` | `endpoint`/`unique_id`/`secret` | NS 模式 gRPC 连接；`geo.source=api`（默认）时地理路由也复用这个连接 |
-| `geo {}` | `xdb` | ip2region xdb 本地缓存路径，留空默认 `"ip2region.xdb"` |
-| `geo {}` | `auto_update` | 是否自动更新 xdb |
-| `geo {}` | `source` | `"api"`（默认，从 edgeapi 拉取）或 `"github"`（直连 GitHub，内部开发/测试用） |
-| `geo {}` | `update_interval` | 自动更新检查间隔 |
+| 顶层 | `listen` | DNS 监听地址，如 `:53`（特权端口需 root/`CAP_NET_BIND_SERVICE`）|
+| 顶层 | `tcp` | 是否同时监听 TCP，默认 `true` |
+| 顶层 | `workers` | 处理协程数，`0` 表示按 CPU 核数自动 |
+| `api {}` | `listen` | 本机 HTTP API 监听地址，默认 `:8080`（健康检查 + CDN 模式推送入口）|
+| `geo {}` | `xdb`/`xdb_v6` | 本地缓存文件路径，留空即可（默认 `ip2region.xdb`/`ip2region_v6.xdb`），内容由下面的 `edgeagent` 自动同步，不需要手动放文件 |
+| `geo {}` | `auto_update`/`update_interval` | 是否自动更新、检查间隔，本地行为参数 |
+| `sync {}` | `interval`/`prob`/`ratelimit` | 轮询节奏参数，本地行为参数，不用改 |
+
+**必须去 EdgeAdmin 里查/建的值**：
+
+| 块 | 字段 | 去哪查 |
+|----|------|--------|
+| `edgeagent {}` | `endpoint` | edgeapi 的 gRPC 地址（`<edgeapi 部署机器IP>:<gRPC端口>`，端口是部署 edgeapi 时自己定的，问运维要） |
+| `edgeagent {}` | `unique_id`/`secret` | 「智能DNS → 集群详情 → 节点管理 → 添加节点」，每个 dns-edge 实例一份**专属**凭证——**不能跟别的实例共用**，同一份凭证被两个进程同时连接会互相顶掉 |
+| `api {}` | `edgedns_access_key_id`/`edgedns_access_key_secret` | 只有需要把 dns-edge 当 **CDN 域名解析的服务商**用时才要配（跟上面的NS模式是两回事）。这两个是自由文本共享密钥，自己定义一对，跟「域名解析 → DNS 服务商 → 添加服务商」（类型选 `EdgeDNS API`）里填的 Host/AccessKeyId/Secret 保持完全一致即可，不查任何账号表 |
+| `geo {}` | `source` | 默认 `"api"`（从 edgeapi 拉取当前生效的 IP 库，对应「系统设置 → IP2Region 库」里上传/激活的那份，不需要额外配置）。`"github"` 是直连官方 GitHub 下载，仅供内部开发测试，客户现场不建议用 |
+| `tls {}` | `listen` | 只决定"本地要不要监听这个端口"，证书本身**不在这里配**——去「智能DNS → 集群详情 → 集群设置 → TLS」选择/上传证书 |
+| `doh {}` | `listen` | 同上，证书去「智能DNS → 集群详情 → 集群设置 → DoH」配置 |
+
+**可选、标准部署不需要**：`nacos {}`（动态权重，非 GoEdge 集成场景用）、`postgres {}`（历史遗留的独立持久化模式，走 edgeapi 同步的标准部署不需要这个）。

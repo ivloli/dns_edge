@@ -1,23 +1,31 @@
 dns-edge {
-    listen   :5300
-    workers  0          # SO_REUSEPORT worker 数；0=禁用，-1=NumCPU，默认 0
+    listen   :53         # DNS 监听地址，特权端口需 root 或 CAP_NET_BIND_SERVICE
+    workers  0           # SO_REUSEPORT worker 数；0=禁用，-1=NumCPU，默认 0
     tcp      true
 
     api {
-        listen :8080
+        listen :8080     # 本机 HTTP API（健康检查 + 可选的 CDN 模式推送入口）
+
+        # 只有把 dns-edge 当"CDN 域名解析服务商"用时才需要这两个：自由文本
+        # 共享密钥，自己定义一对，跟 EdgeAdmin「域名解析→DNS服务商→添加服务商」
+        # （类型选 EdgeDNS API）里填的 AccessKeyId/Secret 保持一致即可。
+        # edgedns_access_key_id     your-key-id
+        # edgedns_access_key_secret your-key-secret
     }
 
-    postgres {
-        dsn  postgres://user:pass@localhost:5432/dns-edge?sslmode=disable
+    # 智能DNS（NS）模式必需：uniqueId/secret 去 EdgeAdmin「智能DNS→集群详情→
+    # 节点管理→添加节点」生成，每个 dns-edge 实例一份专属的，不能跟别的实例共用。
+    edgeagent {
+        endpoint  edgeapi-host:8031  # edgeapi 的 gRPC 地址（host:port，问运维要）
+        unique_id replace-with-real-value
+        secret    replace-with-real-value
     }
 
-    nacos {
-        addr           localhost:8848
-        namespace      ""
-        username       nacos
-        password       nacos
-        group          dns_edge
-        data_id_prefix dns_weights:
+    geo {
+        # 留空即可，默认从 edgeapi 自动拉取当前生效的 ip2region 库
+        # （EdgeAdmin「系统设置→IP2Region库」上传/激活），不需要手动放文件。
+        auto_update     true
+        update_interval 24h
     }
 
     sync {
@@ -25,4 +33,9 @@ dns-edge {
         prob      0.01
         ratelimit 100
     }
+
+    # DoT/DoH：只决定本地监听不监听这个端口，证书去 EdgeAdmin「智能DNS→
+    # 集群详情→集群设置→TLS/DoH」页面配置，不在这里填。
+    # tls { listen :853 }
+    # doh { listen :443 }
 }
