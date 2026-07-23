@@ -14,7 +14,11 @@ RELEASE_NAME := $(APP_NAME)$(if $(RELEASE_INFIX),-$(RELEASE_INFIX),)-$(TARGET_OS
 RELEASE_PATH := $(RELEASE_DIR)/$(RELEASE_NAME)
 RELEASE_BIN := $(RELEASE_PATH)/$(APP_NAME)
 RELEASE_TAR := $(RELEASE_NAME).tar.gz
-CONFIG_SRC ?= Corefile
+# Corefile is intentionally gitignored (it holds real connection secrets on
+# machines that have one) — a fresh clone will never have it. Fall back to
+# the tracked, placeholder-only Corefile.example so packaging still works
+# out of the box; machines with a real local Corefile keep using it.
+CONFIG_SRC ?= $(if $(wildcard Corefile),Corefile,Corefile.example)
 
 RUN_DIR := .run
 LOCAL_CONFIG ?= Corefile.local

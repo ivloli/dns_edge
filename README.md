@@ -70,12 +70,16 @@ GoEdge EdgeAPI（edgeapi，MySQL）
 
 ### 运行
 
+`Corefile` 故意不进 git（machine-local 的机器可能在里面写了真实连接密钥，`.gitignore` 里排除了它）——**全新 clone 下来是没有这个文件的，这是设计如此，不是漏提交**。仓库里跟着的是占位符版本 `Corefile.example`。
+
 ```bash
 # 克隆项目
 git clone <repo-url>
 cd dns-edge
 
-# 编写 Corefile
+# 全新机器打包/编译：直接用占位符模板即可，`make release-package` 在本地没有
+# Corefile 时会自动 fallback 用 Corefile.example，不需要手动处理这一步。
+# 如果本机确实要启动一个真实可用的实例，再照下面这样写一份真正的 Corefile：
 cat > Corefile <<'EOF'
 dns-edge {
     dns {
@@ -104,6 +108,8 @@ EOF
 # 启动
 ./dns-edge -config Corefile
 ```
+
+`edgedns_access_key_id`/`secret`（CDN 模式）或 `edgeagent.unique_id`/`secret`（NS 模式）不能直接照抄另一个已经在跑的实例——那是它专属的连接身份，两边同时用同一份会互相"挤掉"。要一份真正能用的新凭证，去 EdgeAdmin 对应模块（CDN 模式：「域名解析→DNS 服务商→添加服务商」类型选 `EdgeDNS API`；NS 模式：「智能DNS→集群详情→节点管理→添加节点」）新建一个，拿到全新的一对值填进去。
 
 ### Docker
 
