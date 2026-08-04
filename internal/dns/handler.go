@@ -176,7 +176,12 @@ func (h *Handler) handleQuery(m *mdns.Msg, r *mdns.Msg, q mdns.Question, clientI
 	// Direct rrset lookup
 	records := h.store.Lookup(q.Name, q.Qtype)
 	if len(records) > 0 {
-		h.addAnswers(m, records, q.Name, q.Qtype, clientIP)
+		if !h.addAnswers(m, records, q.Name, q.Qtype, clientIP) {
+			if zone := h.store.FindZone(q.Name); zone != nil {
+				m.SetRcode(r, mdns.RcodeSuccess)
+				h.addSOA(m, zone)
+			}
+		}
 		return
 	}
 
@@ -205,7 +210,12 @@ func (h *Handler) handleQuery(m *mdns.Msg, r *mdns.Msg, q mdns.Question, clientI
 	// Wildcard lookup: strip leftmost label and try *.parent for each ancestor.
 	// Handles both direct match (wildcard A) and wildcard CNAME chasing.
 	if wRecords, wName := h.wildcardLookup(q.Name, q.Qtype); len(wRecords) > 0 {
-		h.addAnswers(m, wRecords, wName, q.Qtype, clientIP)
+		if !h.addAnswers(m, wRecords, wName, q.Qtype, clientIP) {
+			if zone := h.store.FindZone(q.Name); zone != nil {
+				m.SetRcode(r, mdns.RcodeSuccess)
+				h.addSOA(m, zone)
+			}
+		}
 		return
 	}
 	if q.Qtype != mdns.TypeCNAME {
@@ -247,22 +257,29 @@ func (h *Handler) handleQuery(m *mdns.Msg, r *mdns.Msg, q mdns.Question, clientI
 	h.addSOA(m, zone)
 }
 
-// addAnswers appends the rrset to the answer section.
-// A and AAAA records are reduced to a single weighted-random pick;
-// all other types are returned in full.
-func (h *Handler) addAnswers(m *mdns.Msg, records []*iface.Record, fqdn string, qtype uint16, clientIP net.IP) {
+// addAnswers appends the rrset to the answer section. Returns whether an
+// answer was actually appended — false means the caller should fall back to
+// a NODATA (empty answer + SOA) response instead.
+//
+// A and AAAA records are reduced to a single weighted-random pick (which may
+// come up empty once geo-routing excludes every candidate — see pick());
+// all other types are returned in full and always succeed when len(records) > 0.
+func (h *Handler) addAnswers(m *mdns.Msg, records []*iface.Record, fqdn string, qtype uint16, clientIP net.IP) bool {
 	switch qtype {
 	case mdns.TypeA, mdns.TypeAAAA:
 		rec := h.pick(records, fqdn, qtype, clientIP)
-		if rec != nil && rec.RR != nil {
-			m.Answer = append(m.Answer, rec.RR)
+		if rec == nil || rec.RR == nil {
+			return false
 		}
+		m.Answer = append(m.Answer, rec.RR)
+		return true
 	default:
 		for _, r := range records {
 			if r.RR != nil {
 				m.Answer = append(m.Answer, r.RR)
 			}
 		}
+		return true
 	}
 }
 
@@ -368,13 +385,11 @@ func (h *Handler) serveAXFR(w mdns.ResponseWriter, r *mdns.Msg, name string) {
 
 // pick selects one record using weighted-random selection.
 //
-// Geo-routing (Phase 13): when a GeoRouter is configured and clientIP is
-// non-nil, records whose RouteTags match the client's geo take priority.
-// The candidate set is built as follows:
-//  1. Records whose RouteTags match the client's geo (specific routes).
-//  2. If no specific-route candidates exist, fall back to records with empty
-//     RouteTags (default routes).
-//  3. If neither exists, use all records.
+// Geo-routing: when a GeoRouter is configured and clientIP is non-nil,
+// filterByGeo narrows records to the most specific fully-matching tier (see
+// its doc comment). filterByGeo may legitimately return nil (client matched
+// nothing, including no default route) — in that case pick returns nil and
+// the caller falls back to NODATA rather than panicking on rand.Intn(0).
 //
 // Weight priority: WeightProvider (dynamic) > Record.Weight (static) > 1.
 func (h *Handler) pick(records []*iface.Record, fqdn string, qtype uint16, clientIP net.IP) *iface.Record {
@@ -383,6 +398,9 @@ func (h *Handler) pick(records []*iface.Record, fqdn string, qtype uint16, clien
 	}
 
 	candidates := h.filterByGeo(records, clientIP)
+	if len(candidates) == 0 {
+		return nil
+	}
 
 	dynWeights := h.weights.GetWeights(fqdn, qtype, clientIP)
 
@@ -412,38 +430,59 @@ func (h *Handler) pick(records []*iface.Record, fqdn string, qtype uint16, clien
 	return candidates[len(candidates)-1]
 }
 
-// geoIPEntry groups the records that share a destination IP (r.Value) while
-// filterByGeo decides which specificity tier that IP belongs to. Keeping the
-// group together (rather than working with flat []*iface.Record) is also
-// what lets highestPriorityRecords narrow a tier by RoutePriority after the
-// tier itself has been picked.
-type geoIPEntry struct {
-	recs          []*iface.Record
-	priority      int32 // max RoutePriority across recs
-	matchProvince bool
-	matchISP      bool
-	matchCountry  bool
-	isDefault     bool
+// parseRouteTags splits a RouteTags string ("country=中国;isp=电信") into a
+// key→value map. An empty string yields an empty (non-nil) map.
+func parseRouteTags(routeTags string) map[string]string {
+	tags := make(map[string]string)
+	if routeTags == "" {
+		return tags
+	}
+	for _, kv := range strings.Split(routeTags, ";") {
+		kv = strings.TrimSpace(kv)
+		if kv == "" {
+			continue
+		}
+		if idx := strings.IndexByte(kv, '='); idx > 0 {
+			tags[kv[:idx]] = kv[idx+1:]
+		}
+	}
+	return tags
 }
 
-// filterByGeo narrows records to those best matching the client's geo.
+// geoField returns the client's GeoInfo value for a route-tag dimension key,
+// so a record's tags can be checked generically without hard-coding which
+// dimensions exist.
+func geoField(info geo.GeoInfo, key string) (string, bool) {
+	switch key {
+	case "country":
+		return info.Country, true
+	case "province":
+		return info.Province, true
+	case "isp":
+		return info.ISP, true
+	default:
+		return "", false
+	}
+}
+
+// filterByGeo narrows records to those whose RouteTags fully match the
+// client's geo, keeping only the most specific matching tier.
 //
-// Records are grouped by destination IP (r.Value) before tier assignment.
-// This prevents a node with separate province and ISP records from being split
-// across lower tiers: if any record for an IP matches province AND any other
-// record for that IP matches ISP, the entire IP is promoted to provinceISP.
+// A record matches only if EVERY key=value pair in its RouteTags equals the
+// client's corresponding GeoInfo field exactly (an unknown tag key, or a
+// client field that is empty, counts as a mismatch) — a single mismatched
+// tag excludes the record entirely, it never falls back to matching on its
+// other tags. A record with empty RouteTags (the default route) always
+// matches, at specificity 0.
 //
-// Fallback chain (first non-empty tier wins):
-//  1. IPs whose records match both the client's province and ISP
-//  2. IPs whose records match the client's province only
-//  3. IPs whose records match the client's ISP only
-//  4. IPs whose records match the client's country only
-//  5. IPs with empty RouteTags (default route)
-//  6. All records (last resort)
-//
-// Within whichever tier wins, highestPriorityRecords further narrows to the
-// IPs whose bound NSRoute carries the highest RoutePriority — see its doc
-// comment for why this only breaks ties and never overrides tier order.
+// Specificity is simply the number of key=value pairs on the record (0 for
+// the default route, up to 3 for country+province+isp) — dimensions are not
+// weighted against each other, so e.g. a lone "isp=电信" and a lone
+// "country=中国" are equally specific. Among matching records, only the
+// highest non-empty specificity tier survives; highestPriorityRecords then
+// narrows that tier by RoutePriority. Returns nil when nothing matches at
+// all (not even the default route) — callers must treat that as NODATA
+// rather than falling back to all records.
 func (h *Handler) filterByGeo(records []*iface.Record, clientIP net.IP) []*iface.Record {
 	if h.geo == nil || clientIP == nil {
 		return records
@@ -451,100 +490,61 @@ func (h *Handler) filterByGeo(records []*iface.Record, clientIP net.IP) []*iface
 
 	info := h.geo.Lookup(clientIP)
 
-	index := make(map[string]*geoIPEntry, len(records))
-	order := make([]string, 0, len(records))
+	tiers := make(map[int][]*iface.Record)
+	maxTier := -1
 
 	for _, r := range records {
-		e := index[r.Value]
-		if e == nil {
-			e = &geoIPEntry{}
-			index[r.Value] = e
-			order = append(order, r.Value)
+		tags := parseRouteTags(r.RouteTags)
+		matched := true
+		for key, val := range tags {
+			clientVal, known := geoField(info, key)
+			if !known || clientVal == "" || clientVal != val {
+				matched = false
+				break
+			}
 		}
-		e.recs = append(e.recs, r)
-		if r.RoutePriority > e.priority {
-			e.priority = r.RoutePriority
-		}
-
-		if r.RouteTags == "" {
-			e.isDefault = true
+		if !matched {
 			continue
 		}
-		if info.Province != "" && containsTag(r.RouteTags, "province", info.Province) {
-			e.matchProvince = true
-		}
-		if info.ISP != "" && containsTag(r.RouteTags, "isp", info.ISP) {
-			e.matchISP = true
-		}
-		if info.Country != "" && containsTag(r.RouteTags, "country", info.Country) {
-			e.matchCountry = true
+		level := len(tags)
+		tiers[level] = append(tiers[level], r)
+		if level > maxTier {
+			maxTier = level
 		}
 	}
 
-	var provinceISP, province, isp, country, defaults []*geoIPEntry
-	for _, ip := range order {
-		e := index[ip]
-		switch {
-		case e.matchProvince && e.matchISP:
-			provinceISP = append(provinceISP, e)
-		case e.matchProvince:
-			province = append(province, e)
-		case e.matchISP:
-			isp = append(isp, e)
-		case e.matchCountry:
-			country = append(country, e)
-		case e.isDefault:
-			defaults = append(defaults, e)
-		}
+	if maxTier < 0 {
+		return nil
 	}
-
-	for _, tier := range [][]*geoIPEntry{provinceISP, province, isp, country, defaults} {
-		if len(tier) > 0 {
-			return highestPriorityRecords(tier)
-		}
-	}
-	return records
+	return highestPriorityRecords(tiers[maxTier])
 }
 
-// highestPriorityRecords narrows entries to those sharing the highest
-// RoutePriority within a single geo tier, then flattens their records.
+// highestPriorityRecords narrows records to those sharing the highest
+// RoutePriority within a single specificity tier.
 //
 // This only breaks ties between distinct NSRoutes that happen to land in the
 // same specificity tier (e.g. two separate "isp:电信" routes bound to
-// different records) — it never overrides tier specificity itself (an
-// isp-tier match still beats a country-tier match regardless of priority,
-// because this runs after the tier is already chosen). Entries that tie on
-// priority — including the common case where nobody set one, so every entry
-// is 0 — all pass through unchanged, so pick()'s existing Weight-based
-// random selection still load-balances across intentionally-equal routes;
-// priority only ever shrinks the candidate set, it doesn't replace weighting.
-func highestPriorityRecords(entries []*geoIPEntry) []*iface.Record {
+// different records) — it never overrides tier specificity itself, because
+// this runs after the tier is already chosen by filterByGeo. Records that
+// tie on priority — including the common case where nobody set one, so every
+// record is 0 — all pass through unchanged, so pick()'s existing
+// Weight-based random selection still load-balances across intentionally-
+// equal routes; priority only ever shrinks the candidate set, it doesn't
+// replace weighting.
+func highestPriorityRecords(records []*iface.Record) []*iface.Record {
 	var maxPriority int32
-	for _, e := range entries {
-		if e.priority > maxPriority {
-			maxPriority = e.priority
+	for _, r := range records {
+		if r.RoutePriority > maxPriority {
+			maxPriority = r.RoutePriority
 		}
 	}
 	var out []*iface.Record
-	for _, e := range entries {
-		if e.priority == maxPriority {
-			out = append(out, e.recs...)
+	for _, r := range records {
+		if r.RoutePriority == maxPriority {
+			out = append(out, r)
 		}
 	}
 	return out
-}
-
-// containsTag reports whether routeTags contains key=val as one of its
-// semicolon-separated pairs. The check is a targeted single-dimension lookup,
-// not a full Match — callers check each dimension independently.
-func containsTag(routeTags, key, val string) bool {
-	target := key + "=" + val
-	for _, kv := range strings.Split(routeTags, ";") {
-		if strings.TrimSpace(kv) == target {
-			return true
-		}
-	}
-	return false
 }
 
 // wildcardLookup strips labels from qname one at a time and checks for a

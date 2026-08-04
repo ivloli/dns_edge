@@ -490,14 +490,47 @@ func TestGeoRouting_PriorityBreaksTierTie(t *testing.T) {
 }
 
 func TestGeoRouting_PriorityNeverOverridesTierSpecificity(t *testing.T) {
-	// recCountry only matches the (less specific) country tier, but carries
-	// a very high priority. recISP matches the (more specific) isp tier with
-	// no priority set at all. isp-tier specificity must still win — priority
-	// only breaks ties *within* a tier, it never promotes a less specific
-	// tier over a more specific one.
+	// recCountry matches only the less-specific 1-tag tier, but carries a
+	// very high priority. recProvinceISP matches the more-specific 2-tag
+	// tier with no priority set at all. The 2-tag tier must still win —
+	// priority only breaks ties *within* a tier, it never promotes a less
+	// specific tier over a more specific one.
 	recCountry := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
 	recCountry.RouteTags = "country=中国"
 	recCountry.RoutePriority = 100
+
+	recProvinceISP := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
+	recProvinceISP.RouteTags = "province=上海;isp=电信"
+	recProvinceISP.RoutePriority = 0
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recCountry, recProvinceISP}
+		},
+	}
+
+	g := &fakeGeo{info: geo.GeoInfo{Country: "中国", Province: "上海", ISP: "电信"}}
+	h := newGeoHandler(store, g)
+
+	for i := 0; i < 20; i++ {
+		rw := testutil.NewFakeRW()
+		req := makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("1.2.3.4"))
+		h.ServeDNS(rw, req)
+		require.Len(t, rw.LastMsg().Answer, 1)
+		a := rw.LastMsg().Answer[0].(*mdns.A)
+		assert.Equal(t, "2.2.2.2", a.A.String(), "2-tag match must beat 1-tag match regardless of priority")
+	}
+}
+
+func TestGeoRouting_SingleTagDimensionsArePeers(t *testing.T) {
+	// Since Round 3, specificity is purely "how many tags fully match" — a
+	// lone country=中国 and a lone isp=电信 are equally specific (both 1 tag),
+	// unlike the old tiered model where isp/province dimensions implicitly
+	// outranked a plain country match. With equal specificity, RoutePriority
+	// breaks the tie, same as same-dimension ties always have.
+	recCountry := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
+	recCountry.RouteTags = "country=中国"
+	recCountry.RoutePriority = 5
 
 	recISP := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
 	recISP.RouteTags = "isp=电信"
@@ -518,7 +551,7 @@ func TestGeoRouting_PriorityNeverOverridesTierSpecificity(t *testing.T) {
 		h.ServeDNS(rw, req)
 		require.Len(t, rw.LastMsg().Answer, 1)
 		a := rw.LastMsg().Answer[0].(*mdns.A)
-		assert.Equal(t, "2.2.2.2", a.A.String(), "isp-tier match must beat country-tier match regardless of priority")
+		assert.Equal(t, "1.1.1.1", a.A.String(), "equal-specificity single-tag records: higher RoutePriority wins")
 	}
 }
 
@@ -756,29 +789,64 @@ func TestGeoRouting_FallbackToCountry(t *testing.T) {
 	assert.Equal(t, "5.5.5.5", rw.LastMsg().Answer[0].(*mdns.A).A.String(), "country record must win over default")
 }
 
-func TestGeoRouting_FallbackToAllWhenNoMatch(t *testing.T) {
-	// Client is overseas; only province/ISP/country records exist, no default.
-	// Should fall back to all records.
+func TestGeoRouting_NoMatchAtAll_ReturnsNODATA(t *testing.T) {
+	// Client is overseas; only province/ISP records exist, no default route.
+	// The old model fell back to "all records" here — Round 3 removes that
+	// fallback entirely: nothing fully matches, so the response must be a
+	// standard NODATA (NOERROR, empty answer, SOA in authority), not a panic
+	// and not an arbitrary record.
 	recShanghai := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
 	recShanghai.RouteTags = "province=上海"
 	recTelecom := testutil.MakeA("www.example.com.", "2.2.2.2", 300, 0)
 	recTelecom.RouteTags = "isp=电信"
 
+	zone := &iface.Zone{Name: "example.com."}
 	store := &testutil.MockZoneStore{
 		LookupFn: func(string, uint16) []*iface.Record {
 			return []*iface.Record{recShanghai, recTelecom}
 		},
+		FindZoneFn: func(string) *iface.Zone { return zone },
 	}
 	g := &fakeGeo{info: geo.GeoInfo{Country: "美国", Province: "", ISP: ""}}
 	h := newGeoHandler(store, g)
 
-	seen := map[string]bool{}
-	for i := 0; i < 50; i++ {
-		rw := testutil.NewFakeRW()
-		h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("8.8.8.8")))
-		if len(rw.LastMsg().Answer) > 0 {
-			seen[rw.LastMsg().Answer[0].(*mdns.A).A.String()] = true
-		}
+	rw := testutil.NewFakeRW()
+	h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("8.8.8.8")))
+	m := rw.LastMsg()
+	require.NotNil(t, m)
+	assert.Equal(t, mdns.RcodeSuccess, m.Rcode, "NODATA is NOERROR, not NXDOMAIN/SERVFAIL")
+	assert.Empty(t, m.Answer, "no record should be returned once every candidate is excluded")
+	require.Len(t, m.Ns, 1, "NODATA must carry exactly one SOA in the authority section")
+	_, isSOA := m.Ns[0].(*mdns.SOA)
+	assert.True(t, isSOA, "authority record must be SOA")
+}
+
+func TestGeoRouting_PartialTagMismatch_ExcludesRecordEntirely(t *testing.T) {
+	// This is the exact bug the user reported: a record bound to
+	// "country=中国;isp=电信" must NOT stay in the candidate pool just because
+	// its country tag matches when the client's ISP doesn't (中国+移动 client
+	// against a 中国+电信-only record). The old tiered model let the country
+	// tag alone promote it into the "country" tier; the new model must
+	// exclude it entirely, and fall through to the default route instead.
+	recTelecom := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
+	recTelecom.RouteTags = "country=中国;isp=电信"
+	recDefault := testutil.MakeA("www.example.com.", "3.3.3.3", 300, 0)
+	recDefault.RouteTags = ""
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recTelecom, recDefault}
+		},
 	}
-	assert.True(t, seen["1.1.1.1"] || seen["2.2.2.2"], "all-records fallback should return some record")
+	// Client is 中国+移动: country matches, isp does not.
+	g := &fakeGeo{info: geo.GeoInfo{Country: "中国", Province: "", ISP: "移动"}}
+	h := newGeoHandler(store, g)
+
+	for i := 0; i < 20; i++ {
+		rw := testutil.NewFakeRW()
+		h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("1.2.3.4")))
+		require.Len(t, rw.LastMsg().Answer, 1)
+		assert.Equal(t, "3.3.3.3", rw.LastMsg().Answer[0].(*mdns.A).A.String(),
+			"country+isp record must be excluded entirely on ISP mismatch, not fall back into a country-only tier")
+	}
 }

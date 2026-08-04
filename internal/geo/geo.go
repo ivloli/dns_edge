@@ -22,6 +22,8 @@ import (
 	"sync"
 
 	"github.com/lionsoul2014/ip2region/binding/golang/xdb"
+
+	"gitlab.gainetics.io/backend-cdn/goedge/edgecommon/pkg/iplibrary"
 )
 
 // GeoInfo holds the parsed fields returned by ip2region.
@@ -153,14 +155,14 @@ func parseRegion(raw string) GeoInfo {
 	switch len(parts) {
 	case 4:
 		// "中国|浙江省|绍兴市|电信"
-		province = normalizeProvince(strings.TrimSpace(parts[1]))
-		isp = normalizeISP(strings.TrimSpace(parts[3]))
+		province = iplibrary.NormalizeProvince(strings.TrimSpace(parts[1]))
+		isp = iplibrary.NormalizeISP(strings.TrimSpace(parts[3]))
 	case 5:
 		// "中国|广东省|广州市|中国电信|CN" or "中国|0|0|移动|CN" — ISP is
 		// always parts[3]; parts[4] is always the trailing country code,
 		// regardless of whether the province (parts[1]) is known.
-		province = normalizeProvince(strings.TrimSpace(parts[1]))
-		isp = normalizeISP(strings.TrimSpace(parts[3]))
+		province = iplibrary.NormalizeProvince(strings.TrimSpace(parts[1]))
+		isp = iplibrary.NormalizeISP(strings.TrimSpace(parts[3]))
 	default:
 		return GeoInfo{}
 	}
@@ -169,28 +171,6 @@ func parseRegion(raw string) GeoInfo {
 		country = ""
 	}
 	return GeoInfo{Country: country, Province: province, ISP: isp}
-}
-
-// normalizeProvince strips trailing "省" / "市".
-func normalizeProvince(s string) string {
-	s = strings.TrimSuffix(s, "省")
-	s = strings.TrimSuffix(s, "市")
-	s = strings.TrimSpace(s)
-	if s == "0" {
-		return ""
-	}
-	return s
-}
-
-// normalizeISP strips "中国" and "云" prefixes to match GoEdge route short names.
-func normalizeISP(s string) string {
-	s = strings.ReplaceAll(s, "中国", "")
-	s = strings.ReplaceAll(s, "云", "")
-	s = strings.TrimSpace(s)
-	if s == "0" {
-		return ""
-	}
-	return s
 }
 
 // Match reports whether geo matches routeTags.
