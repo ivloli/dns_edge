@@ -393,7 +393,7 @@ func (h *Handler) serveAXFR(w mdns.ResponseWriter, r *mdns.Msg, name string) {
 //
 // Weight priority: WeightProvider (dynamic) > Record.Weight (static) > 1.
 func (h *Handler) pick(records []*iface.Record, fqdn string, qtype uint16, clientIP net.IP) *iface.Record {
-	if len(records) == 1 {
+	if len(records) == 1 && records[0].RouteTags == "" {
 		return records[0]
 	}
 

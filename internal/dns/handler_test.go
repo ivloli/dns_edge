@@ -850,3 +850,56 @@ func TestGeoRouting_PartialTagMismatch_ExcludesRecordEntirely(t *testing.T) {
 			"country+isp record must be excluded entirely on ISP mismatch, not fall back into a country-only tier")
 	}
 }
+
+func TestGeoRouting_SoleCandidate_GeoMismatch_ReturnsNODATA(t *testing.T) {
+	// Regression for pick()'s len(records)==1 short-circuit: when a name has
+	// exactly one record and that record carries a specific RouteTag, the
+	// short-circuit used to hand it back unconditionally, completely
+	// bypassing filterByGeo (and therefore NODATA semantics) whenever a
+	// client's geo did not match. Only a lone *default* record (empty
+	// RouteTags) may skip geo filtering.
+	recTelecom := testutil.MakeA("www.example.com.", "1.1.1.1", 300, 0)
+	recTelecom.RouteTags = "isp=电信"
+
+	zone := &iface.Zone{Name: "example.com."}
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recTelecom}
+		},
+		FindZoneFn: func(string) *iface.Zone { return zone },
+	}
+	// Client is 移动, not 电信: the sole record's tag does not match.
+	g := &fakeGeo{info: geo.GeoInfo{Country: "", Province: "", ISP: "移动"}}
+	h := newGeoHandler(store, g)
+
+	rw := testutil.NewFakeRW()
+	h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("8.8.8.8")))
+	m := rw.LastMsg()
+	require.NotNil(t, m)
+	assert.Equal(t, mdns.RcodeSuccess, m.Rcode, "NODATA is NOERROR, not NXDOMAIN/SERVFAIL")
+	assert.Empty(t, m.Answer, "the sole record must not be returned when its route tag does not match the client")
+	require.Len(t, m.Ns, 1, "NODATA must carry exactly one SOA in the authority section")
+	_, isSOA := m.Ns[0].(*mdns.SOA)
+	assert.True(t, isSOA, "authority record must be SOA")
+}
+
+func TestGeoRouting_SoleDefaultCandidate_AlwaysReturned(t *testing.T) {
+	// The len(records)==1 fast path must still apply when that lone record
+	// IS the default route (empty RouteTags) — no geo lookup needed, no
+	// behavior change from before the fix.
+	recDefault := testutil.MakeA("www.example.com.", "9.9.9.9", 300, 0)
+	recDefault.RouteTags = ""
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(string, uint16) []*iface.Record {
+			return []*iface.Record{recDefault}
+		},
+	}
+	g := &fakeGeo{info: geo.GeoInfo{Country: "美国", Province: "", ISP: ""}}
+	h := newGeoHandler(store, g)
+
+	rw := testutil.NewFakeRW()
+	h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("8.8.8.8")))
+	require.Len(t, rw.LastMsg().Answer, 1)
+	assert.Equal(t, "9.9.9.9", rw.LastMsg().Answer[0].(*mdns.A).A.String())
+}
