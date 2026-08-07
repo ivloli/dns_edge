@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ import (
 	dnshandler "dns-edge/internal/dns"
 	"dns-edge/internal/iface"
 	"dns-edge/internal/nsroute"
+	"dns-edge/internal/version"
 )
 
 // Agent polls edgeapi for NS node tasks and refreshes ZoneStore.
@@ -231,7 +233,13 @@ func (a *Agent) watchConnState(ctx context.Context, conn *grpc.ClientConn) {
 
 // reportStatus sends the node's online status to edgeapi.
 func (a *Agent) reportStatus(ctx context.Context, client pb.NSNodeServiceClient, isActive bool) {
-	statusJSON, _ := json.Marshal(map[string]bool{"isActive": isActive})
+	statusJSON, _ := json.Marshal(map[string]any{
+		"isActive":         isActive,
+		"buildVersion":     version.Version,
+		"buildVersionCode": version.ToLong(version.Version),
+		"os":               runtime.GOOS,
+		"arch":             runtime.GOARCH,
+	})
 	if _, err := client.UpdateNSNodeStatus(ctx, &pb.UpdateNSNodeStatusRequest{StatusJSON: statusJSON}); err != nil {
 		a.log.Warn("edgeagent: UpdateNSNodeStatus failed", zap.Error(err))
 	}
