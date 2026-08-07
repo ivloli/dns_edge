@@ -7,7 +7,7 @@ BIN_DIR := bin
 BIN_PATH := $(BIN_DIR)/$(APP_NAME)
 TARGET_OS ?= linux
 TARGET_ARCH ?= amd64
-RELEASE_TAG ?= $(shell git describe --always --dirty --tags 2>/dev/null || date +%Y%m%d%H%M%S)
+RELEASE_TAG ?= v$(shell grep -oP 'Version\s*=\s*"\K[0-9.]+' internal/version/version.go)
 RELEASE_DIR := release
 RELEASE_INFIX ?=
 RELEASE_NAME := $(APP_NAME)$(if $(RELEASE_INFIX),-$(RELEASE_INFIX),)-$(TARGET_OS)-$(TARGET_ARCH)-$(RELEASE_TAG)
