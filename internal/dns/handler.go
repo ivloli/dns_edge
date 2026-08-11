@@ -189,10 +189,15 @@ func (h *Handler) handleQuery(m *mdns.Msg, r *mdns.Msg, q mdns.Question, clientI
 	if q.Qtype != mdns.TypeCNAME {
 		cnames := h.store.Lookup(q.Name, mdns.TypeCNAME)
 		if len(cnames) > 0 {
-			cn := cnames[0]
-			if cn.RR != nil {
-				m.Answer = append(m.Answer, cn.RR)
+			cn := h.pick(cnames, q.Name, mdns.TypeCNAME, clientIP)
+			if cn == nil || cn.RR == nil {
+				if zone := h.store.FindZone(q.Name); zone != nil {
+					m.SetRcode(r, mdns.RcodeSuccess)
+					h.addSOA(m, zone)
+				}
+				return
 			}
+			m.Answer = append(m.Answer, cn.RR)
 			target := ""
 			if rr, ok := cn.RR.(*mdns.CNAME); ok {
 				target = rr.Target
@@ -219,8 +224,15 @@ func (h *Handler) handleQuery(m *mdns.Msg, r *mdns.Msg, q mdns.Question, clientI
 		return
 	}
 	if q.Qtype != mdns.TypeCNAME {
-		if wCnames, _ := h.wildcardLookup(q.Name, mdns.TypeCNAME); len(wCnames) > 0 {
-			cn := wCnames[0]
+		if wCnames, wCnameName := h.wildcardLookup(q.Name, mdns.TypeCNAME); len(wCnames) > 0 {
+			cn := h.pick(wCnames, wCnameName, mdns.TypeCNAME, clientIP)
+			if cn == nil {
+				if zone := h.store.FindZone(q.Name); zone != nil {
+					m.SetRcode(r, mdns.RcodeSuccess)
+					h.addSOA(m, zone)
+				}
+				return
+			}
 			// Synthesize a CNAME RR with the queried name as owner.
 			synth, _ := mdns.NewRR(fmt.Sprintf("%s %d IN CNAME %s", q.Name, cn.TTL, cn.Value))
 			if synth != nil {
@@ -261,12 +273,16 @@ func (h *Handler) handleQuery(m *mdns.Msg, r *mdns.Msg, q mdns.Question, clientI
 // answer was actually appended — false means the caller should fall back to
 // a NODATA (empty answer + SOA) response instead.
 //
-// A and AAAA records are reduced to a single weighted-random pick (which may
-// come up empty once geo-routing excludes every candidate — see pick());
-// all other types are returned in full and always succeed when len(records) > 0.
+// A, AAAA and CNAME are reduced to a single weighted-random pick (which may
+// come up empty once geo-routing excludes every candidate — see pick()); a
+// name can only have one effective CNAME, so this mirrors A/AAAA rather than
+// returning every RouteTags-tagged CNAME. All other types are geo-narrowed
+// (RouteTags-tagged records excluded for clients whose geo doesn't match —
+// see filterByGeo) but returned in full, since multiple records legitimately
+// coexist for e.g. MX/TXT/NS.
 func (h *Handler) addAnswers(m *mdns.Msg, records []*iface.Record, fqdn string, qtype uint16, clientIP net.IP) bool {
 	switch qtype {
-	case mdns.TypeA, mdns.TypeAAAA:
+	case mdns.TypeA, mdns.TypeAAAA, mdns.TypeCNAME:
 		rec := h.pick(records, fqdn, qtype, clientIP)
 		if rec == nil || rec.RR == nil {
 			return false
@@ -274,7 +290,11 @@ func (h *Handler) addAnswers(m *mdns.Msg, records []*iface.Record, fqdn string, 
 		m.Answer = append(m.Answer, rec.RR)
 		return true
 	default:
-		for _, r := range records {
+		candidates := h.filterByGeo(records, clientIP)
+		if len(candidates) == 0 {
+			return false
+		}
+		for _, r := range candidates {
 			if r.RR != nil {
 				m.Answer = append(m.Answer, r.RR)
 			}

@@ -903,3 +903,141 @@ func TestGeoRouting_SoleDefaultCandidate_AlwaysReturned(t *testing.T) {
 	require.Len(t, rw.LastMsg().Answer, 1)
 	assert.Equal(t, "9.9.9.9", rw.LastMsg().Answer[0].(*mdns.A).A.String())
 }
+
+// ── CNAME + geo routing (regression: CNAME chase used to bypass filterByGeo
+// entirely, always returning cnames[0] to every client regardless of geo) ──
+
+func TestGeoRouting_CNAMEChase_GeoMismatch_ReturnsNODATA(t *testing.T) {
+	// Customer-reported scenario: www CNAME'd to a Japan-only target. A
+	// client resolving from the US must NOT get the Japan-scoped CNAME.
+	cn := testutil.MakeCNAME("www.example.com.", "tz4.com.", 300)
+	cn.RouteTags = "country=日本"
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(name string, qtype uint16) []*iface.Record {
+			if name == "www.example.com." && qtype == mdns.TypeCNAME {
+				return []*iface.Record{cn}
+			}
+			return nil
+		},
+		FindZoneFn: func(name string) *iface.Zone {
+			return testutil.MakeZone("example.com.")
+		},
+	}
+	g := &fakeGeo{info: geo.GeoInfo{Country: "美国"}}
+	h := newGeoHandler(store, g)
+
+	rw := testutil.NewFakeRW()
+	h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("8.8.8.8")))
+	m := rw.LastMsg()
+	require.NotNil(t, m)
+	assert.Equal(t, mdns.RcodeSuccess, m.Rcode, "NODATA, not NXDOMAIN — the name exists, just not for this client's geo")
+	assert.Empty(t, m.Answer, "US client must not receive the Japan-only CNAME")
+}
+
+func TestGeoRouting_CNAMEChase_GeoMatch_ChasesToTarget(t *testing.T) {
+	cn := testutil.MakeCNAME("www.example.com.", "tz4.com.", 300)
+	cn.RouteTags = "country=日本"
+	aRec := testutil.MakeA("tz4.com.", "5.6.7.8", 300, 0)
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(name string, qtype uint16) []*iface.Record {
+			switch {
+			case name == "www.example.com." && qtype == mdns.TypeCNAME:
+				return []*iface.Record{cn}
+			case name == "tz4.com." && qtype == mdns.TypeA:
+				return []*iface.Record{aRec}
+			}
+			return nil
+		},
+	}
+	g := &fakeGeo{info: geo.GeoInfo{Country: "日本"}}
+	h := newGeoHandler(store, g)
+
+	rw := testutil.NewFakeRW()
+	h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeA, net.ParseIP("1.2.3.4")))
+	m := rw.LastMsg()
+	require.Len(t, m.Answer, 2, "CNAME + A")
+	assert.Equal(t, mdns.TypeCNAME, m.Answer[0].Header().Rrtype)
+	assert.Equal(t, "5.6.7.8", m.Answer[1].(*mdns.A).A.String())
+}
+
+func TestGeoRouting_WildcardCNAMEChase_GeoMismatch_ReturnsNODATA(t *testing.T) {
+	cn := testutil.MakeCNAME("*.example.com.", "tz4.com.", 300)
+	cn.RouteTags = "country=日本"
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(name string, qtype uint16) []*iface.Record {
+			if name == "*.example.com." && qtype == mdns.TypeCNAME {
+				return []*iface.Record{cn}
+			}
+			return nil
+		},
+		FindZoneFn: func(name string) *iface.Zone {
+			return testutil.MakeZone("example.com.")
+		},
+	}
+	g := &fakeGeo{info: geo.GeoInfo{Country: "美国"}}
+	h := newGeoHandler(store, g)
+
+	rw := testutil.NewFakeRW()
+	h.ServeDNS(rw, makeQueryWithECS("sub.example.com.", mdns.TypeA, net.ParseIP("8.8.8.8")))
+	m := rw.LastMsg()
+	require.NotNil(t, m)
+	assert.Equal(t, mdns.RcodeSuccess, m.Rcode)
+	assert.Empty(t, m.Answer, "US client must not receive the Japan-only wildcard CNAME")
+}
+
+func TestGeoRouting_DirectCNAMEQuery_GeoMismatch_ReturnsNODATA(t *testing.T) {
+	// Client queries CNAME type directly (addAnswers' A/AAAA/CNAME branch),
+	// not via an A-query chase.
+	cn := testutil.MakeCNAME("www.example.com.", "tz4.com.", 300)
+	cn.RouteTags = "country=日本"
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(name string, qtype uint16) []*iface.Record {
+			if name == "www.example.com." && qtype == mdns.TypeCNAME {
+				return []*iface.Record{cn}
+			}
+			return nil
+		},
+		FindZoneFn: func(name string) *iface.Zone {
+			return testutil.MakeZone("example.com.")
+		},
+	}
+	g := &fakeGeo{info: geo.GeoInfo{Country: "美国"}}
+	h := newGeoHandler(store, g)
+
+	rw := testutil.NewFakeRW()
+	h.ServeDNS(rw, makeQueryWithECS("www.example.com.", mdns.TypeCNAME, net.ParseIP("8.8.8.8")))
+	m := rw.LastMsg()
+	require.NotNil(t, m)
+	assert.Empty(t, m.Answer)
+}
+
+// ── Other RR types + geo routing (regression: addAnswers' default branch
+// used to return every record unfiltered, ignoring RouteTags entirely) ──
+
+func TestGeoRouting_MX_ExcludesNonMatchingTaggedRecord(t *testing.T) {
+	mxDefault := testutil.MakeMX("example.com.", 10, "mail-default.example.com.", 300)
+	mxDefault.RouteTags = ""
+	mxJapan := testutil.MakeMX("example.com.", 10, "mail-jp.example.com.", 300)
+	mxJapan.RouteTags = "country=日本"
+
+	store := &testutil.MockZoneStore{
+		LookupFn: func(name string, qtype uint16) []*iface.Record {
+			if name == "example.com." && qtype == mdns.TypeMX {
+				return []*iface.Record{mxDefault, mxJapan}
+			}
+			return nil
+		},
+	}
+	g := &fakeGeo{info: geo.GeoInfo{Country: "美国"}}
+	h := newGeoHandler(store, g)
+
+	rw := testutil.NewFakeRW()
+	h.ServeDNS(rw, makeQueryWithECS("example.com.", mdns.TypeMX, net.ParseIP("8.8.8.8")))
+	m := rw.LastMsg()
+	require.Len(t, m.Answer, 1, "only the default-route MX should survive for a US client")
+	assert.Equal(t, "mail-default.example.com.", m.Answer[0].(*mdns.MX).Mx)
+}
