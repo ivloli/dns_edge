@@ -14,7 +14,7 @@ import (
 
 // Version is dns-edge's build version. Bump this on every release that
 // should be visible to EdgeAdmin's upgrade-detection banner.
-const Version = "1.0.4"
+const Version = "1.0.5"
 
 // ToLong encodes a dotted version string (e.g. "1.0.0") as a comparable
 // uint32 by zero-padding it to 4 segments and reading it as an IPv4
