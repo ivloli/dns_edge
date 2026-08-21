@@ -141,7 +141,7 @@ func (a *Agent) Run(ctx context.Context) {
 	// edgeapi, mirroring the zoneCount-based auto-recovery CDN mode already
 	// has (there it's edgeapi-initiated since edgeapi pushes; here it has to
 	// be agent-initiated since the agent pulls).
-	if err := a.syncDomains(ctx, domainClient, recordClient, &domainVersion); err != nil {
+	if err := a.syncDomains(ctx, domainClient, recordClient, &domainVersion, &recordVersion); err != nil {
 		a.log.Warn("edgeagent: initial domain sync failed", zap.Error(err))
 	}
 	if err := a.syncRecords(ctx, recordClient, &recordVersion); err != nil {
@@ -459,7 +459,7 @@ func (a *Agent) poll(
 			// the whole cluster). Re-fetch and apply all of them.
 			taskErr = a.refreshNodeConfig(ctx, nsNodeClient)
 		case "nsDomainChanged":
-			taskErr = a.syncDomains(ctx, domainClient, recordClient, domainVersion)
+			taskErr = a.syncDomains(ctx, domainClient, recordClient, domainVersion, recordVersion)
 		case "nsRecordChanged":
 			taskErr = a.syncRecords(ctx, recordClient, recordVersion)
 		case "nsIP2RegionChanged":
@@ -499,11 +499,18 @@ func (a *Agent) poll(
 // comes back after being dropped (the domain was switched off and on again,
 // say) would stay empty forever: its records are all older than the cursor,
 // nothing re-delivers them, and the domain resolves NXDOMAIN with no error
-// anywhere. Whenever a zone is created, its records are therefore fetched in
-// full for that domain alone, rather than resetting the shared cursor and
-// re-pulling every record of every domain.
-func (a *Agent) syncDomains(ctx context.Context, client pb.NSDomainServiceClient, recordClient pb.NSRecordServiceClient, version *int64) error {
+// anywhere. Creating a zone therefore rewinds the record cursor and re-runs
+// record sync, which is what a cold start already does.
+//
+// Rewinding re-pulls every record the node serves, not just the new zone's.
+// Fetching one domain's records on their own would need ListNSRecords, which
+// only admins and users may call — a DNS node is rejected there, and the
+// rejection would be logged and swallowed, leaving the zone as empty as
+// before. ListNSRecordsAfterVersion is the one record query a node is allowed
+// to make, and it is already scoped to the node's cluster.
+func (a *Agent) syncDomains(ctx context.Context, client pb.NSDomainServiceClient, recordClient pb.NSRecordServiceClient, version *int64, recordVersion *int64) error {
 	const pageSize = 200
+	var createdZone bool
 	for {
 		resp, err := client.ListNSDomainsAfterVersion(ctx, &pb.ListNSDomainsAfterVersionRequest{
 			Version: *version,
@@ -529,13 +536,7 @@ func (a *Agent) syncDomains(ctx context.Context, client pb.NSDomainServiceClient
 						SOA:     a.buildSOA(apex),
 						NS:      a.buildNS(apex),
 					})
-					if err := a.syncRecordsOfDomain(ctx, recordClient, d.Id); err != nil {
-						// Worth surfacing but not worth aborting the whole
-						// domain sync over: the zone exists either way, and
-						// a later record change will still reach it.
-						a.log.Warn("edgeagent: backfill records for new zone failed",
-							zap.String("domain", d.Name), zap.Error(err))
-					}
+					createdZone = true
 				}
 			}
 			if d.Version > *version {
@@ -546,37 +547,14 @@ func (a *Agent) syncDomains(ctx context.Context, client pb.NSDomainServiceClient
 			break
 		}
 	}
-	return nil
-}
 
-// syncRecordsOfDomain pulls every record of one domain, regardless of version,
-// and applies them to the ZoneStore. Used to fill a zone that was just
-// created, where the incremental cursor is of no help.
-func (a *Agent) syncRecordsOfDomain(ctx context.Context, client pb.NSRecordServiceClient, domainId int64) error {
-	if domainId <= 0 {
-		return nil
+	if createdZone {
+		*recordVersion = 0
+		if err := a.syncRecords(ctx, recordClient, recordVersion); err != nil {
+			return fmt.Errorf("refill records for new zone: %w", err)
+		}
 	}
-	const pageSize = 200
-	var offset int64
-	for {
-		resp, err := client.ListNSRecords(ctx, &pb.ListNSRecordsRequest{
-			NsDomainId: domainId,
-			Offset:     offset,
-			Size:       pageSize,
-		})
-		if err != nil {
-			return fmt.Errorf("ListNSRecords: %w", err)
-		}
-		for _, r := range resp.NsRecords {
-			if err := a.applyRecord(r); err != nil {
-				a.log.Warn("edgeagent: applyRecord failed during backfill", zap.Int64("id", r.Id), zap.Error(err))
-			}
-		}
-		if int32(len(resp.NsRecords)) < pageSize {
-			break
-		}
-		offset += pageSize
-	}
+
 	return nil
 }
 
